@@ -5,6 +5,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #if defined (__INTELLISENSE__) || !defined(USE_CPP20_MODULES)
 #include <vulkan/vulkan_raii.hpp>
@@ -18,10 +19,21 @@ import vulkan_hpp;
 constexpr uint32_t WIDTH = 800;
 constexpr uint32_t HEIGHT = 600;
 
+const std::vector<char const*> validationLayers = {
+	"VK_LAYER_KHRONOS_validation"
+};
+
+#ifdef NDEBUG 
+constexpr bool enableValidationLayers = false;
+#else
+constexpr bool enableValidationLayers = true;
+#endif
+
 class Application {
 
 public:
-	void run() {
+	void run() 
+	{
 		initWindow();
 		initVulkan();
 		mainLoop();
@@ -33,8 +45,10 @@ private:
 
 	vk::raii::Context context;
 	vk::raii::Instance instance = nullptr;
+	vk::raii::DebugUtilsMessengerEXT debugMessenger = nullptr;
 
-	void initWindow() {
+	void initWindow() 
+	{
 		glfwInit();
 
 		glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -43,18 +57,22 @@ private:
 		window = glfwCreateWindow(WIDTH, HEIGHT, "VulkanEngine", nullptr, nullptr);
 	}
 
-	void initVulkan() {
+	void initVulkan() 
+	{
 		createInstance();
+		setupDebugMessenger();
 	}
 
-	void mainLoop() {
+	void mainLoop() 
+	{
 		while (!glfwWindowShouldClose(window)) {
 			glfwPollEvents();
 		}
 
 	}
 
-	void cleanup() {
+	void cleanup() 
+	{
 		glfwDestroyWindow(window);
 
 		glfwTerminate();
@@ -75,31 +93,90 @@ private:
 											  .engineVersion = VK_MAKE_VERSION(1, 0, 0),
 											  .apiVersion = vk::ApiVersion14 };
 
-		// Ask GLFW which Vulkan instance extensions are needed to present
-		// to a window on this platform.
-		uint32_t glfwExtensionCount = 0;
-		auto glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
-
-		// Make sure Vulkan supports every extension GLFW requires.
-		auto extensionProperties = context.enumerateInstanceExtensionProperties();
-		for (uint32_t i = 0; i < glfwExtensionCount; ++i)
+		// Retrieve the required layers.
+		std::vector<char const*> requiredLayers;
+		if (enableValidationLayers)
 		{
-			if (std::ranges::none_of(extensionProperties,
-									 [glfwExtension = glfwExtensions[i]](auto const& extensionProperty)
-									 { return strcmp(extensionProperty.extensionName, glfwExtension) == 0; }))
-			{
-				throw std::runtime_error("Missing required GLFW extension: " + std::string(glfwExtensions[i]));
-			}
+			requiredLayers.assign(validationLayers.begin(), validationLayers.end());
+		}
+
+		// Verify that the Vulkan implementation supports all required layers.
+		auto layerProperties = context.enumerateInstanceLayerProperties();
+		auto unsupportedLayerIt = std::ranges::find_if(requiredLayers,
+			[&layerProperties](auto const& requiredLayer) {
+				return std::ranges::none_of(layerProperties,
+					[requiredLayer](auto const& layerProperty) { return strcmp(layerProperty.layerName, requiredLayer) == 0; });
+			});
+		if (unsupportedLayerIt != requiredLayers.end())
+		{
+			throw std::runtime_error("Unsupported required layer: " + std::string(*unsupportedLayerIt));
+		}
+
+		// Retrieve the required instance extensions.
+		auto requiredExtensions = getRequiredInstanceExtensions();
+
+		// Verify that the Vulkan implementation supports all required extensions.
+		auto extensionProperties = context.enumerateInstanceExtensionProperties();
+		auto unsupportedPropertyIt =
+			std::ranges::find_if(requiredExtensions,
+				[&extensionProperties](auto const& requiredExtension) {
+					return std::ranges::none_of(extensionProperties,
+						[requiredExtension](auto const& extensionProperty) { return strcmp(extensionProperty.extensionName, requiredExtension) == 0; });
+				});
+		if (unsupportedPropertyIt != requiredExtensions.end())
+		{
+			throw std::runtime_error("Required extension not supported: " + std::string(*unsupportedPropertyIt));
 		}
 
 		vk::InstanceCreateInfo createInfo{
 			.pApplicationInfo = &appInfo,
-			.enabledExtensionCount = glfwExtensionCount,
-			.ppEnabledExtensionNames = glfwExtensions};
+			.enabledLayerCount = static_cast<uint32_t>(requiredLayers.size()),
+			.ppEnabledLayerNames = requiredLayers.data(),
+			.enabledExtensionCount = static_cast<uint32_t>(requiredExtensions.size()),
+			.ppEnabledExtensionNames = requiredExtensions.data() };
 		instance = vk::raii::Instance(context, createInfo);
-
 	}
 
+	void setupDebugMessenger()
+	{
+		if (!enableValidationLayers)
+			return;
+
+		vk::DebugUtilsMessageSeverityFlagsEXT severityFlags(vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning |
+			vk::DebugUtilsMessageSeverityFlagBitsEXT::eError);
+		vk::DebugUtilsMessageTypeFlagsEXT	   messageTypeFlags(
+			vk::DebugUtilsMessageTypeFlagBitsEXT::eGeneral | vk::DebugUtilsMessageTypeFlagBitsEXT::ePerformance | vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation);
+		vk::DebugUtilsMessengerCreateInfoEXT debugUtilsMessengerCreateInfoEXT{ .messageSeverity = severityFlags,
+																			  .messageType = messageTypeFlags,
+																			  .pfnUserCallback = &debugCallback };
+		debugMessenger = instance.createDebugUtilsMessengerEXT(debugUtilsMessengerCreateInfoEXT);
+	}
+
+	// Combine GLFW's required extensions with the debug extension, if validation layers are enabled.
+	std::vector<const char*> getRequiredInstanceExtensions() const
+	{
+		uint32_t glfwExtensionCount = 0;
+		auto glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
+
+		std::vector extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
+		if (enableValidationLayers)
+		{
+			extensions.push_back(vk::EXTDebugUtilsExtensionName);
+		}
+
+		return extensions;
+	}
+
+	// Called by Vulkan whenever a validation layer has a message to report.
+	static VKAPI_ATTR vk::Bool32 VKAPI_CALL debugCallback(vk::DebugUtilsMessageSeverityFlagBitsEXT severity, vk::DebugUtilsMessageTypeFlagsEXT type, const vk::DebugUtilsMessengerCallbackDataEXT* pCallbackData, void*)
+	{
+		if (severity == vk::DebugUtilsMessageSeverityFlagBitsEXT::eError || severity == vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning)
+		{
+			std::cerr << "validation layer: type: " << to_string(type) << " msg: " << pCallbackData->pMessage << std::endl;
+		}
+
+		return vk::False;
+	}
 };
 
 int main()
@@ -117,6 +194,3 @@ int main()
 
 	return EXIT_SUCCESS;
 }
-
-
-
