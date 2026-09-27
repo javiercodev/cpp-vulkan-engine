@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <assert.h>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -48,6 +49,10 @@ private:
 	vk::raii::DebugUtilsMessengerEXT debugMessenger = nullptr;
 
 	vk::raii::PhysicalDevice physicalDevice = nullptr;
+	vk::raii::Device device = nullptr;
+
+	vk::raii::Queue graphicsQueue = nullptr;
+
 
 	std::vector<const char*> requiredDeviceExtension = {
 		vk::KHRSwapchainExtensionName };
@@ -67,6 +72,7 @@ private:
 		createInstance();
 		setupDebugMessenger();
 		pickPhysicalDevice();
+		createLogicalDevice();
 	}
 
 	void mainLoop()
@@ -161,7 +167,7 @@ private:
 	bool isDeviceSuitable(vk::raii::PhysicalDevice const& physicalDevice) 
 	{
 		// Verify that the physicalDevice supports the Vulkan 1.3 API version.
-		bool supportsVulkan1_3 = physicalDevice.getProperties().apiVersion >= vk::ApiVersion13;
+		bool supportsVulkan1_3 = physicalDevice.getProperties().apiVersion >= VK_API_VERSION_1_3;
 
 		// Determine whether any queue family supports graphics operations.
 		auto queueFamilies = physicalDevice.getQueueFamilyProperties();
@@ -201,6 +207,45 @@ private:
 
 		// Log the selected GPU for diagnostics.
 		std::cout << "selected GPU: " << physicalDevice.getProperties().deviceName << '\n';
+	}
+
+	void createLogicalDevice()
+	{
+		// Locate the first queue family that supports graphics operations.
+		std::vector<vk::QueueFamilyProperties> queueFamilyProperties = physicalDevice.getQueueFamilyProperties();
+
+		// Retrieve the index of the first queue family that supports graphics operations.
+		auto graphicsQueueFamilyProperty = std::ranges::find_if(queueFamilyProperties, [](auto const& qfp) { return (qfp.queueFlags & vk::QueueFlagBits::eGraphics) != static_cast<vk::QueueFlags>(0); });
+		assert(graphicsQueueFamilyProperty != queueFamilyProperties.end() && "No queue family with graphics support was found!");
+
+		auto graphicsIndex = static_cast<uint32_t>(std::distance(queueFamilyProperties.begin(), graphicsQueueFamilyProperty));
+
+		// query the available Vulkan 1.3 features.
+		vk::StructureChain<vk::PhysicalDeviceFeatures2,
+						   vk::PhysicalDeviceVulkan11Features,
+						   vk::PhysicalDeviceVulkan13Features,
+						   vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>
+			featureChain = {
+				{},
+				{.shaderDrawParameters = true},
+				{.dynamicRendering = true},
+				{.extendedDynamicState = true}
+			};
+
+		// Create the logical device.
+		float queuePriority = 0.5f;
+		vk::DeviceQueueCreateInfo deviceQueueCreateInfo{.queueFamilyIndex = graphicsIndex, .queueCount = 1, .pQueuePriorities = &queuePriority };
+		vk::DeviceCreateInfo deviceCreateInfo{.pNext                  = &featureChain.get<vk::PhysicalDeviceFeatures2>(),
+											  .queueCreateInfoCount    = 1,
+											  .pQueueCreateInfos       = &deviceQueueCreateInfo,
+											  .enabledExtensionCount   = static_cast<uint32_t>(requiredDeviceExtension.size()),
+											  .ppEnabledExtensionNames = requiredDeviceExtension.data()};
+
+		device        = vk::raii::Device(physicalDevice, deviceCreateInfo);
+		graphicsQueue = vk::raii::Queue(device, graphicsIndex, 0);
+
+		// Log the graphics queue family index for diagnostics.
+		std::cout << "graphics queue family index: " << graphicsIndex << '\n';
 	}
 
 	// Combine GLFW's required extensions with the debug extension, if validation layers are enabled.
