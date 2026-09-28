@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <assert.h>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -14,8 +13,11 @@
 import vulkan_hpp;
 #endif
 
+#define VK_USE_PLATFORM_WIN32_KHR
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
 
 constexpr uint32_t WIDTH = 800;
 constexpr uint32_t HEIGHT = 600;
@@ -24,7 +26,7 @@ const std::vector<char const*> validationLayers = {
 	"VK_LAYER_KHRONOS_validation"
 };
 
-#ifdef NDEBUG 
+#ifdef NDEBUG
 constexpr bool enableValidationLayers = false;
 #else
 constexpr bool enableValidationLayers = true;
@@ -47,11 +49,10 @@ private:
 	vk::raii::Context context;
 	vk::raii::Instance instance = nullptr;
 	vk::raii::DebugUtilsMessengerEXT debugMessenger = nullptr;
-
+	vk::raii::SurfaceKHR surface = nullptr;
 	vk::raii::PhysicalDevice physicalDevice = nullptr;
 	vk::raii::Device device = nullptr;
-
-	vk::raii::Queue graphicsQueue = nullptr;
+	vk::raii::Queue queue = nullptr;
 
 
 	std::vector<const char*> requiredDeviceExtension = {
@@ -71,6 +72,7 @@ private:
 	{
 		createInstance();
 		setupDebugMessenger();
+		createSurface();
 		pickPhysicalDevice();
 		createLogicalDevice();
 	}
@@ -163,15 +165,32 @@ private:
 		debugMessenger = instance.createDebugUtilsMessengerEXT(debugUtilsMessengerCreateInfoEXT);
 	}
 
+	void createSurface()
+	{
+		VkSurfaceKHR _surface;
+		if (glfwCreateWindowSurface(*instance, window, nullptr, &_surface) != VK_SUCCESS)
+		{
+			throw std::runtime_error("window surface creation failed!");
+		}
+		surface = vk::raii::SurfaceKHR(instance, _surface);
+	}
+
 	// Determine whether a physicalDevice meets all the requirements for this application.
-	bool isDeviceSuitable(vk::raii::PhysicalDevice const& physicalDevice) 
+	bool isDeviceSuitable(vk::raii::PhysicalDevice const& physicalDevice)
 	{
 		// Verify that the physicalDevice supports the Vulkan 1.3 API version.
 		bool supportsVulkan1_3 = physicalDevice.getProperties().apiVersion >= VK_API_VERSION_1_3;
 
-		// Determine whether any queue family supports graphics operations.
+		// Verify whether any queue family supports both graphics and presentation to the surface.
 		auto queueFamilies = physicalDevice.getQueueFamilyProperties();
-		bool supportsGraphics = std::ranges::any_of(queueFamilies, [](auto const& qfp) { return !!(qfp.queueFlags & vk::QueueFlagBits::eGraphics); });
+		uint32_t qfpIndex = 0;
+		bool supportsGraphicsAndPresent =
+			std::ranges::any_of(queueFamilies,
+				[&physicalDevice, &surface = this->surface, &qfpIndex](auto const &qfp) {
+					bool const suitable = (qfp.queueFlags & vk::QueueFlagBits::eGraphics) && physicalDevice.getSurfaceSupportKHR(qfpIndex, *surface);
+					qfpIndex++;
+					return suitable;
+			});
 
 		// Verify that all required physicalDevice extensions are available.
 		auto availableDeviceExtensions = physicalDevice.enumerateDeviceExtensionProperties();
@@ -192,7 +211,7 @@ private:
 										features.template get<vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>().extendedDynamicState;
 
 		// Return true when the physicalDevice satisfies all required criteria.
-		return supportsVulkan1_3 && supportsGraphics && supportsAllRequiredExtensions && supportsRequiredFeatures;
+		return supportsVulkan1_3 && supportsGraphicsAndPresent && supportsAllRequiredExtensions && supportsRequiredFeatures;
 	}
 
 	void pickPhysicalDevice()
@@ -211,16 +230,26 @@ private:
 
 	void createLogicalDevice()
 	{
-		// Locate the first queue family that supports graphics operations.
 		std::vector<vk::QueueFamilyProperties> queueFamilyProperties = physicalDevice.getQueueFamilyProperties();
 
-		// Retrieve the index of the first queue family that supports graphics operations.
-		auto graphicsQueueFamilyProperty = std::ranges::find_if(queueFamilyProperties, [](auto const& qfp) { return (qfp.queueFlags & vk::QueueFlagBits::eGraphics) != static_cast<vk::QueueFlags>(0); });
-		assert(graphicsQueueFamilyProperty != queueFamilyProperties.end() && "No queue family with graphics support was found!");
+		// Locate the first queue family that supports both graphics and presentation.
+		uint32_t queueIndex = ~0;
+		for (uint32_t qfpIndex = 0; qfpIndex < queueFamilyProperties.size(); qfpIndex++)
+		{
+			if ((queueFamilyProperties[qfpIndex].queueFlags & vk::QueueFlagBits::eGraphics) &&
+				physicalDevice.getSurfaceSupportKHR(qfpIndex, *surface))
+			{
+				// Found a queue family supporting both graphics and presentation.
+				queueIndex = qfpIndex;
+				break;
+			}
+		}
+		if (queueIndex == ~0)
+		{
+			throw std::runtime_error("No queue family supports both graphics and presentation; terminating.");
+		}
 
-		auto graphicsIndex = static_cast<uint32_t>(std::distance(queueFamilyProperties.begin(), graphicsQueueFamilyProperty));
-
-		// query the available Vulkan 1.3 features.
+		// Query the available Vulkan 1.3 features.
 		vk::StructureChain<vk::PhysicalDeviceFeatures2,
 						   vk::PhysicalDeviceVulkan11Features,
 						   vk::PhysicalDeviceVulkan13Features,
@@ -234,18 +263,18 @@ private:
 
 		// Create the logical device.
 		float queuePriority = 0.5f;
-		vk::DeviceQueueCreateInfo deviceQueueCreateInfo{.queueFamilyIndex = graphicsIndex, .queueCount = 1, .pQueuePriorities = &queuePriority };
+		vk::DeviceQueueCreateInfo deviceQueueCreateInfo{.queueFamilyIndex = queueIndex, .queueCount = 1, .pQueuePriorities = &queuePriority };
 		vk::DeviceCreateInfo deviceCreateInfo{.pNext                  = &featureChain.get<vk::PhysicalDeviceFeatures2>(),
 											  .queueCreateInfoCount    = 1,
 											  .pQueueCreateInfos       = &deviceQueueCreateInfo,
 											  .enabledExtensionCount   = static_cast<uint32_t>(requiredDeviceExtension.size()),
 											  .ppEnabledExtensionNames = requiredDeviceExtension.data()};
 
-		device        = vk::raii::Device(physicalDevice, deviceCreateInfo);
-		graphicsQueue = vk::raii::Queue(device, graphicsIndex, 0);
+		device = vk::raii::Device(physicalDevice, deviceCreateInfo);
+		queue = vk::raii::Queue(device, queueIndex, 0);
 
 		// Log the graphics queue family index for diagnostics.
-		std::cout << "graphics queue family index: " << graphicsIndex << '\n';
+		std::cout << "graphics queue family index: " << queueIndex << '\n';
 	}
 
 	// Combine GLFW's required extensions with the debug extension, if validation layers are enabled.
