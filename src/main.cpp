@@ -1,7 +1,9 @@
 #include <algorithm>
+#include <assert.h>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -13,11 +15,8 @@
 import vulkan_hpp;
 #endif
 
-#define VK_USE_PLATFORM_WIN32_KHR
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
-#define GLFW_EXPOSE_NATIVE_WIN32
-#include <GLFW/glfw3native.h>
 
 constexpr uint32_t WIDTH = 800;
 constexpr uint32_t HEIGHT = 600;
@@ -53,7 +52,11 @@ private:
 	vk::raii::PhysicalDevice physicalDevice = nullptr;
 	vk::raii::Device device = nullptr;
 	vk::raii::Queue queue = nullptr;
-
+	vk::raii::SwapchainKHR swapChain = nullptr;
+	std::vector<vk::Image> swapChainImages;
+	vk::SurfaceFormatKHR swapChainSurfaceFormat;
+	vk::Extent2D swapChainExtent;
+	std::vector<vk::raii::ImageView> swapChainImageViews;
 
 	std::vector<const char*> requiredDeviceExtension = {
 		vk::KHRSwapchainExtensionName };
@@ -61,10 +64,8 @@ private:
 	void initWindow()
 	{
 		glfwInit();
-
 		glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 		glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-
 		window = glfwCreateWindow(WIDTH, HEIGHT, "VulkanEngine", nullptr, nullptr);
 	}
 
@@ -75,6 +76,7 @@ private:
 		createSurface();
 		pickPhysicalDevice();
 		createLogicalDevice();
+		createSwapChain();
 	}
 
 	void mainLoop()
@@ -87,7 +89,6 @@ private:
 	void cleanup()
 	{
 		glfwDestroyWindow(window);
-
 		glfwTerminate();
 	}
 
@@ -100,11 +101,13 @@ private:
 			std::cout << '\t' << extension.extensionName << '\n';
 		}
 
-		constexpr vk::ApplicationInfo appInfo{.pApplicationName = "cpp-vulkan-engine",
-											  .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
-											  .pEngineName = "VulkanEngine",
-											  .engineVersion = VK_MAKE_VERSION(1, 0, 0),
-											  .apiVersion = vk::ApiVersion14 };
+		constexpr vk::ApplicationInfo appInfo {
+			.pApplicationName = "cpp-vulkan-engine",
+			.applicationVersion = VK_MAKE_VERSION(1, 0, 0),
+			.pEngineName = "VulkanEngine",
+			.engineVersion = VK_MAKE_VERSION(1, 0, 0),
+			.apiVersion = vk::ApiVersion14
+		};
 
 		// Retrieve the required layers.
 		std::vector<char const*> requiredLayers;
@@ -136,17 +139,19 @@ private:
 					return std::ranges::none_of(extensionProperties,
 						[requiredExtension](auto const& extensionProperty) { return strcmp(extensionProperty.extensionName, requiredExtension) == 0; });
 				});
+
 		if (unsupportedPropertyIt != requiredExtensions.end())
 		{
 			throw std::runtime_error("Required extension not supported: " + std::string(*unsupportedPropertyIt));
 		}
 
-		vk::InstanceCreateInfo createInfo{
+		vk::InstanceCreateInfo createInfo {
 			.pApplicationInfo = &appInfo,
 			.enabledLayerCount = static_cast<uint32_t>(requiredLayers.size()),
 			.ppEnabledLayerNames = requiredLayers.data(),
 			.enabledExtensionCount = static_cast<uint32_t>(requiredExtensions.size()),
-			.ppEnabledExtensionNames = requiredExtensions.data() };
+			.ppEnabledExtensionNames = requiredExtensions.data()
+		};
 		instance = vk::raii::Instance(context, createInfo);
 	}
 
@@ -157,11 +162,12 @@ private:
 
 		vk::DebugUtilsMessageSeverityFlagsEXT severityFlags(vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning |
 															vk::DebugUtilsMessageSeverityFlagBitsEXT::eError);
-		vk::DebugUtilsMessageTypeFlagsEXT	  messageTypeFlags(
+		vk::DebugUtilsMessageTypeFlagsEXT messageTypeFlags(
 			vk::DebugUtilsMessageTypeFlagBitsEXT::eGeneral | vk::DebugUtilsMessageTypeFlagBitsEXT::ePerformance | vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation);
 		vk::DebugUtilsMessengerCreateInfoEXT debugUtilsMessengerCreateInfoEXT{.messageSeverity = severityFlags,
 																			  .messageType = messageTypeFlags,
 																			  .pfnUserCallback = &debugCallback };
+
 		debugMessenger = instance.createDebugUtilsMessengerEXT(debugUtilsMessengerCreateInfoEXT);
 	}
 
@@ -202,7 +208,7 @@ private:
 				});
 
 		// Verify that the physicalDevice supports all required features.
-		auto features =  physicalDevice.template getFeatures2<vk::PhysicalDeviceFeatures2,
+		auto features = physicalDevice.template getFeatures2< vk::PhysicalDeviceFeatures2,
 															  vk::PhysicalDeviceVulkan11Features,
 															  vk::PhysicalDeviceVulkan13Features,
 															  vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>();
@@ -264,11 +270,12 @@ private:
 		// Create the logical device.
 		float queuePriority = 0.5f;
 		vk::DeviceQueueCreateInfo deviceQueueCreateInfo{.queueFamilyIndex = queueIndex, .queueCount = 1, .pQueuePriorities = &queuePriority };
-		vk::DeviceCreateInfo deviceCreateInfo{.pNext                  = &featureChain.get<vk::PhysicalDeviceFeatures2>(),
-											  .queueCreateInfoCount    = 1,
-											  .pQueueCreateInfos       = &deviceQueueCreateInfo,
-											  .enabledExtensionCount   = static_cast<uint32_t>(requiredDeviceExtension.size()),
-											  .ppEnabledExtensionNames = requiredDeviceExtension.data()};
+		vk::DeviceCreateInfo deviceCreateInfo{
+			.pNext = &featureChain.get<vk::PhysicalDeviceFeatures2>(),
+			.queueCreateInfoCount = 1,
+			.pQueueCreateInfos = &deviceQueueCreateInfo,
+			.enabledExtensionCount = static_cast<uint32_t>(requiredDeviceExtension.size()),
+			.ppEnabledExtensionNames = requiredDeviceExtension.data()};
 
 		device = vk::raii::Device(physicalDevice, deviceCreateInfo);
 		queue = vk::raii::Queue(device, queueIndex, 0);
@@ -277,6 +284,88 @@ private:
 		std::cout << "graphics queue family index: " << queueIndex << '\n';
 	}
 
+	void createSwapChain()
+	{
+		vk::SurfaceCapabilitiesKHR surfaceCapabilities = physicalDevice.getSurfaceCapabilitiesKHR(*surface);
+		swapChainExtent = chooseSwapExtent(surfaceCapabilities);
+		uint32_t minImageCount = chooseSwapMinImageCount(surfaceCapabilities);
+
+		std::vector<vk::SurfaceFormatKHR> availableFormats = physicalDevice.getSurfaceFormatsKHR(*surface);
+		swapChainSurfaceFormat = chooseSwapSurfaceFormat(availableFormats);
+
+		std::vector<vk::PresentModeKHR> availablePresentModes = physicalDevice.getSurfacePresentModesKHR(*surface);
+		vk::PresentModeKHR presentMode = chooseSwapPresentMode(availablePresentModes);
+
+		vk::SwapchainCreateInfoKHR swapChainCreateInfo{
+			.surface = *surface,
+			.minImageCount = minImageCount,
+			.imageFormat = swapChainSurfaceFormat.format,
+			.imageColorSpace = swapChainSurfaceFormat.colorSpace,
+			.imageExtent = swapChainExtent,
+			.imageArrayLayers = 1,
+			.imageUsage = vk::ImageUsageFlagBits::eColorAttachment,
+			.imageSharingMode = vk::SharingMode::eExclusive,
+			.preTransform = surfaceCapabilities.currentTransform,
+			.compositeAlpha = vk::CompositeAlphaFlagBitsKHR::eOpaque,
+			.presentMode = presentMode,
+			.clipped = true
+		};
+
+		swapChain = vk::raii::SwapchainKHR(device, swapChainCreateInfo);
+		swapChainImages = swapChain.getImages();
+
+		// Log the swap chain details for diagnostics.
+		std::cout << "swap chain images: " << swapChainImages.size()
+				  << ", format: " << to_string(swapChainSurfaceFormat.format)
+			      << ", extent: " << swapChainExtent.width << 'x' << swapChainExtent.height << '\n';
+	}
+
+	// Pick at least 3 swap chain images (triple buffering), clamped to what the surface allows.
+	static uint32_t chooseSwapMinImageCount(vk::SurfaceCapabilitiesKHR const &surfaceCapabilities)
+	{
+		auto minImageCount = std::max(3u, surfaceCapabilities.minImageCount);
+		if ((0 < surfaceCapabilities.maxImageCount) && (surfaceCapabilities.maxImageCount < minImageCount))
+		{
+			minImageCount = surfaceCapabilities.maxImageCount;
+		}
+		return minImageCount;
+	}
+
+	// Prefer sRGB 8-bit color, falling back to the first available format.
+	static vk::SurfaceFormatKHR chooseSwapSurfaceFormat(std::vector<vk::SurfaceFormatKHR> const &availableFormats)
+	{
+		assert(!availableFormats.empty());
+		const auto formatIt = std::ranges::find_if(
+			availableFormats,
+			[](const auto &format) { return format.format == vk::Format::eB8G8R8A8Srgb && format.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear; });
+		return formatIt != availableFormats.end() ? *formatIt : availableFormats[0];
+	}
+
+	// Prefer Mailbox for lower latency, falling back to Fifo (always guaranteed by Vulkan).
+	static vk::PresentModeKHR chooseSwapPresentMode(std::vector<vk::PresentModeKHR> const& availablePresentModes)
+	{
+		assert(std::ranges::any_of(availablePresentModes, [](auto presentMode) { return presentMode == vk::PresentModeKHR::eFifo; }));
+		return std::ranges::any_of(availablePresentModes,
+			[](const vk::PresentModeKHR value) { return vk::PresentModeKHR::eMailbox == value; }) ?
+			vk::PresentModeKHR::eMailbox :
+			vk::PresentModeKHR::eFifo;
+	}
+
+	// Determine the swap chain image size, in pixels, clamped to the surface's limits.
+	vk::Extent2D chooseSwapExtent(vk::SurfaceCapabilitiesKHR const &capabilities)
+	{
+		if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max())
+		{
+			return capabilities.currentExtent;
+		}
+		int width, height;
+		glfwGetFramebufferSize(window, &width, &height);
+
+		return {
+			std::clamp<uint32_t>(width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width),
+			std::clamp <uint32_t>(height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height)
+		};
+	}
 	// Combine GLFW's required extensions with the debug extension, if validation layers are enabled.
 	std::vector<const char*> getRequiredInstanceExtensions() const
 	{
