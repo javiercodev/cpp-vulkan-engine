@@ -77,6 +77,7 @@ private:
 		pickPhysicalDevice();
 		createLogicalDevice();
 		createSwapChain();
+		createImageViews();
 	}
 
 	void mainLoop()
@@ -239,7 +240,7 @@ private:
 		std::vector<vk::QueueFamilyProperties> queueFamilyProperties = physicalDevice.getQueueFamilyProperties();
 
 		// Locate the first queue family that supports both graphics and presentation.
-		uint32_t queueIndex = ~0;
+		uint32_t queueIndex = ~0; // ~0 as a sentinel meaning "not found yet"
 		for (uint32_t qfpIndex = 0; qfpIndex < queueFamilyProperties.size(); qfpIndex++)
 		{
 			if ((queueFamilyProperties[qfpIndex].queueFlags & vk::QueueFlagBits::eGraphics) &&
@@ -261,7 +262,7 @@ private:
 						   vk::PhysicalDeviceVulkan13Features,
 						   vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>
 			featureChain = {
-				{},
+				{}, // PhysicalDeviceFeatures2 left empty; only used to chain the structs below
 				{.shaderDrawParameters = true},
 				{.dynamicRendering = true},
 				{.extendedDynamicState = true}
@@ -320,6 +321,27 @@ private:
 			      << ", extent: " << swapChainExtent.width << 'x' << swapChainExtent.height << '\n';
 	}
 
+	void createImageViews()
+	{
+		assert(swapChainImageViews.empty());
+
+		vk::ImageViewCreateInfo imageViewCreateInfo{
+			.viewType = vk::ImageViewType::e2D,
+			.format = swapChainSurfaceFormat.format,
+			// Color aspect, no mipmaps (1 level) and sigle layer (not an array texture).
+			.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+		};
+
+		for (auto &image : swapChainImages)
+		{
+			imageViewCreateInfo.image = image;
+			swapChainImageViews.emplace_back(device, imageViewCreateInfo);
+		}
+
+		// Log the number of image views created for diagnostics.
+		std::cout << "image views created: " << swapChainImageViews.size() << '\n';
+	}
+
 	// Pick at least 3 swap chain images (triple buffering), clamped to what the surface allows.
 	static uint32_t chooseSwapMinImageCount(vk::SurfaceCapabilitiesKHR const &surfaceCapabilities)
 	{
@@ -332,7 +354,7 @@ private:
 	}
 
 	// Prefer sRGB 8-bit color, falling back to the first available format.
-	static vk::SurfaceFormatKHR chooseSwapSurfaceFormat(std::vector<vk::SurfaceFormatKHR> const &availableFormats)
+	static vk::SurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<vk::SurfaceFormatKHR> &availableFormats)
 	{
 		assert(!availableFormats.empty());
 		const auto formatIt = std::ranges::find_if(
@@ -363,9 +385,10 @@ private:
 
 		return {
 			std::clamp<uint32_t>(width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width),
-			std::clamp <uint32_t>(height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height)
+			std::clamp<uint32_t>(height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height)
 		};
 	}
+
 	// Combine GLFW's required extensions with the debug extension, if validation layers are enabled.
 	std::vector<const char*> getRequiredInstanceExtensions() const
 	{
