@@ -78,6 +78,7 @@ private:
 		createLogicalDevice();
 		createSwapChain();
 		createImageViews();
+		createGraphicsPipeline();
 	}
 
 	void mainLoop()
@@ -340,6 +341,10 @@ private:
 
 		// Log the number of image views created for diagnostics.
 		std::cout << "image views created: " << swapChainImageViews.size() << '\n';
+	}
+
+	void createGraphicsPipeline()
+	{
 	}
 
 	// Pick at least 3 swap chain images (triple buffering), clamped to what the surface allows.
