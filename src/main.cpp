@@ -59,6 +59,7 @@ private:
 	vk::Extent2D swapChainExtent;
 	std::vector<vk::raii::ImageView> swapChainImageViews;
 	vk::raii::PipelineLayout pipelineLayout = nullptr;
+	vk::raii::Pipeline graphicsPipeline = nullptr;
 
 	std::vector<const char*> requiredDeviceExtension = {
 		vk::KHRSwapchainExtensionName };
@@ -331,7 +332,7 @@ private:
 		vk::ImageViewCreateInfo imageViewCreateInfo{
 			.viewType = vk::ImageViewType::e2D,
 			.format = swapChainSurfaceFormat.format,
-			// Color aspect, no mipmaps (1 level) and sigle layer (not an array texture).
+			// Color aspect, no mipmaps (1 level) and single layer (not an array texture).
 			.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		};
 
@@ -347,14 +348,17 @@ private:
 
 	void createGraphicsPipeline()
 	{
-		// The compiled .spv contains bothn the vertex and fragment entry points,
-		// so a single header module is loaded and reused for both stages.
+		// The compiled .spv contains both the vertex and fragment entry points,
+		// so a single sheader module is loaded and reused for both stages.
 		vk::raii::ShaderModule shaderModule = createShaderModule(readFile("shaders/slang.spv"));
 		vk::PipelineShaderStageCreateInfo vertShaderStageInfo{.stage = vk::ShaderStageFlagBits::eVertex, .module = shaderModule, .pName = "vertMain" };
 		vk::PipelineShaderStageCreateInfo fragShaderStageInfo{.stage = vk::ShaderStageFlagBits::eFragment, .module = shaderModule, .pName = "fragMain" };
 		vk::PipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
 
-		// No vertex buffers yet: the vertices are hardcoded in vertex shader.
+		// Log that the shader module loaded successfully, for diagnostics.
+		std::cout << "shader module loaded, stages: " << std::size(shaderStages) << '\n';
+
+		// No vertex buffers yet: the vertices are hardcoded in the vertex shader.
 		vk::PipelineVertexInputStateCreateInfo vertexInputInfo;
 		vk::PipelineInputAssemblyStateCreateInfo inputAssembly{.topology = vk::PrimitiveTopology::eTriangleList};
 		// Only the counts are set; viewport and scissor are dynamic and set at draw time.
@@ -390,11 +394,31 @@ private:
 		vk::PipelineLayoutCreateInfo pipelineLayoutInfo{ .setLayoutCount = 0, .pushConstantRangeCount = 0 };
 		pipelineLayout = vk::raii::PipelineLayout(device, pipelineLayoutInfo);
 
-		// Log that the shader module loaded successfully, for diagnostics.
-		std::cout << "shader module loaded, stages: " << std::size(shaderStages) << '\n';
-
 		// Log that the pipeline was created for diagnostics.
 		std::cout << "pipeline layout created: " << (*pipelineLayout != VK_NULL_HANDLE ? "yes" : "no") << '\n';
+
+		// Chained PipelineRenderingCreateInfo describes the attachment formats (dynamic rendering),
+		// so no render pass is needed.
+		vk::StructureChain<vk::GraphicsPipelineCreateInfo, vk::PipelineRenderingCreateInfo> pipelineCreateInfoChain = {
+			{.stageCount = 2,
+			 .pStages = shaderStages,
+			 .pVertexInputState = &vertexInputInfo,
+			 .pInputAssemblyState = &inputAssembly,
+			 .pViewportState = &viewportState,
+			 .pRasterizationState = &rasterizer,
+			 .pMultisampleState = &multisampling,
+			 .pColorBlendState = &colorBlending,
+			 .pDynamicState = &dynamicState,
+			 .layout = pipelineLayout,
+			 .renderPass = nullptr},
+			{.colorAttachmentCount = 1, .pColorAttachmentFormats = &swapChainSurfaceFormat.format}
+		};
+
+		// No pipeline cache (nullptr).
+		graphicsPipeline = vk::raii::Pipeline(device, nullptr, pipelineCreateInfoChain.get<vk::GraphicsPipelineCreateInfo>());
+
+		// Log that the graphics pipeline was created for diagnostics.
+		std::cout << "graphics pipeline created: " << (*graphicsPipeline != VK_NULL_HANDLE ? "yes" : "no") << '\n';
 	}
 
 	[[nodiscard]] vk::raii::ShaderModule createShaderModule(const std::vector<char> &code) const
