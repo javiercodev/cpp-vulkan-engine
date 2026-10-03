@@ -58,6 +58,7 @@ private:
 	vk::SurfaceFormatKHR swapChainSurfaceFormat;
 	vk::Extent2D swapChainExtent;
 	std::vector<vk::raii::ImageView> swapChainImageViews;
+	vk::raii::PipelineLayout pipelineLayout = nullptr;
 
 	std::vector<const char*> requiredDeviceExtension = {
 		vk::KHRSwapchainExtensionName };
@@ -353,8 +354,47 @@ private:
 		vk::PipelineShaderStageCreateInfo fragShaderStageInfo{.stage = vk::ShaderStageFlagBits::eFragment, .module = shaderModule, .pName = "fragMain" };
 		vk::PipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
 
+		// No vertex buffers yet: the vertices are hardcoded in vertex shader.
+		vk::PipelineVertexInputStateCreateInfo vertexInputInfo;
+		vk::PipelineInputAssemblyStateCreateInfo inputAssembly{.topology = vk::PrimitiveTopology::eTriangleList};
+		// Only the counts are set; viewport and scissor are dynamic and set at draw time.
+		vk::PipelineViewportStateCreateInfo viewportState{.viewportCount = 1, .scissorCount = 1 };
+
+		vk::PipelineRasterizationStateCreateInfo rasterizer{
+			.depthClampEnable = vk::False,
+			.rasterizerDiscardEnable = vk::False,
+			.polygonMode = vk::PolygonMode::eFill,
+			.cullMode = vk::CullModeFlagBits::eBack,
+			// Clockwise because Vulkan's Y axis points down.
+			.frontFace = vk::FrontFace::eClockwise,
+			.depthBiasEnable = vk::False,
+			.lineWidth = 1.0f
+		};
+
+		vk::PipelineMultisampleStateCreateInfo multisampling{ .rasterizationSamples = vk::SampleCountFlagBits::e1, .sampleShadingEnable = vk::False};
+
+		vk::PipelineColorBlendAttachmentState colorBlendAttachment{
+			.blendEnable = vk::False,
+			.colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG | vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA
+		};
+
+		vk::PipelineColorBlendStateCreateInfo colorBlending{
+			.logicOpEnable = vk::False, .logicOp = vk::LogicOp::eCopy, .attachmentCount = 1, .pAttachments = &colorBlendAttachment
+		};
+
+		// Viewport and scissor can change without recreating the pipeline (e.g. on resize).
+		std::vector<vk::DynamicState> dynamicStates = {vk::DynamicState::eViewport, vk::DynamicState::eScissor };
+		vk::PipelineDynamicStateCreateInfo dynamicState{.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size()), .pDynamicStates = dynamicStates.data()};
+
+		// Empty layout (no descriptor sets, no push constants), but still required by the pipeline.
+		vk::PipelineLayoutCreateInfo pipelineLayoutInfo{ .setLayoutCount = 0, .pushConstantRangeCount = 0 };
+		pipelineLayout = vk::raii::PipelineLayout(device, pipelineLayoutInfo);
+
 		// Log that the shader module loaded successfully, for diagnostics.
 		std::cout << "shader module loaded, stages: " << std::size(shaderStages) << '\n';
+
+		// Log that the pipeline was created for diagnostics.
+		std::cout << "pipeline layout created: " << (*pipelineLayout != VK_NULL_HANDLE ? "yes" : "no") << '\n';
 	}
 
 	[[nodiscard]] vk::raii::ShaderModule createShaderModule(const std::vector<char> &code) const
