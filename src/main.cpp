@@ -66,14 +66,24 @@ private:
 
 	void initWindow()
 	{
-		glfwInit();
+		if (!glfwInit())
+		{
+			throw std::runtime_error("failed to initialize GLFW!");
+		}
 		glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 		glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 		window = glfwCreateWindow(WIDTH, HEIGHT, "VulkanEngine", nullptr, nullptr);
+		if (!window)
+		{
+			// cleanup() is not reached when run() throws, so GLFW is terminated here.
+			glfwTerminate();
+			throw std::runtime_error("failed to create the window!");
+		}
 	}
 
 	void initVulkan()
 	{
+		// Each step prints a short diagnostic line to stdout once it completes.
 		createInstance();
 		setupDebugMessenger();
 		createSurface();
@@ -99,7 +109,6 @@ private:
 
 	void createInstance()
 	{
-		// Log available instance extensions for diagnostics.
 		auto extensions = context.enumerateInstanceExtensionProperties();
 		std::cout << "available extensions:\n";
 		for (const auto &extension : extensions) {
@@ -235,7 +244,6 @@ private:
 		}
 		physicalDevice = *devIter;
 
-		// Log the selected GPU for diagnostics.
 		std::cout << "selected GPU: " << physicalDevice.getProperties().deviceName << '\n';
 	}
 
@@ -244,7 +252,7 @@ private:
 		std::vector<vk::QueueFamilyProperties> queueFamilyProperties = physicalDevice.getQueueFamilyProperties();
 
 		// Locate the first queue family that supports both graphics and presentation.
-		uint32_t queueIndex = ~0; // ~0 as a sentinel meaning "not found yet"
+		uint32_t queueIndex = ~0u; // ~0u as a sentinel meaning "not found yet"
 		for (uint32_t qfpIndex = 0; qfpIndex < queueFamilyProperties.size(); qfpIndex++)
 		{
 			if ((queueFamilyProperties[qfpIndex].queueFlags & vk::QueueFlagBits::eGraphics) &&
@@ -255,7 +263,7 @@ private:
 				break;
 			}
 		}
-		if (queueIndex == ~0)
+		if (queueIndex == ~0u)
 		{
 			throw std::runtime_error("No queue family supports both graphics and presentation; terminating.");
 		}
@@ -285,7 +293,6 @@ private:
 		device = vk::raii::Device(physicalDevice, deviceCreateInfo);
 		queue = vk::raii::Queue(device, queueIndex, 0);
 
-		// Log the graphics queue family index for diagnostics.
 		std::cout << "graphics queue family index: " << queueIndex << '\n';
 	}
 
@@ -319,7 +326,6 @@ private:
 		swapChain = vk::raii::SwapchainKHR(device, swapChainCreateInfo);
 		swapChainImages = swapChain.getImages();
 
-		// Log the swap chain details for diagnostics.
 		std::cout << "swap chain images: " << swapChainImages.size()
 				  << ", format: " << to_string(swapChainSurfaceFormat.format)
 			      << ", extent: " << swapChainExtent.width << 'x' << swapChainExtent.height << '\n';
@@ -342,20 +348,18 @@ private:
 			swapChainImageViews.emplace_back(device, imageViewCreateInfo);
 		}
 
-		// Log the number of image views created for diagnostics.
 		std::cout << "image views created: " << swapChainImageViews.size() << '\n';
 	}
 
 	void createGraphicsPipeline()
 	{
 		// The compiled .spv contains both the vertex and fragment entry points,
-		// so a single sheader module is loaded and reused for both stages.
+		// so a single shader module is loaded and reused for both stages.
 		vk::raii::ShaderModule shaderModule = createShaderModule(readFile("shaders/slang.spv"));
 		vk::PipelineShaderStageCreateInfo vertShaderStageInfo{.stage = vk::ShaderStageFlagBits::eVertex, .module = shaderModule, .pName = "vertMain" };
 		vk::PipelineShaderStageCreateInfo fragShaderStageInfo{.stage = vk::ShaderStageFlagBits::eFragment, .module = shaderModule, .pName = "fragMain" };
 		vk::PipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
 
-		// Log that the shader module loaded successfully, for diagnostics.
 		std::cout << "shader module loaded, stages: " << std::size(shaderStages) << '\n';
 
 		// No vertex buffers yet: the vertices are hardcoded in the vertex shader.
@@ -394,7 +398,6 @@ private:
 		vk::PipelineLayoutCreateInfo pipelineLayoutInfo{ .setLayoutCount = 0, .pushConstantRangeCount = 0 };
 		pipelineLayout = vk::raii::PipelineLayout(device, pipelineLayoutInfo);
 
-		// Log that the pipeline was created for diagnostics.
 		std::cout << "pipeline layout created: " << (*pipelineLayout != VK_NULL_HANDLE ? "yes" : "no") << '\n';
 
 		// Chained PipelineRenderingCreateInfo describes the attachment formats (dynamic rendering),
@@ -417,7 +420,6 @@ private:
 		// No pipeline cache (nullptr).
 		graphicsPipeline = vk::raii::Pipeline(device, nullptr, pipelineCreateInfoChain.get<vk::GraphicsPipelineCreateInfo>());
 
-		// Log that the graphics pipeline was created for diagnostics.
 		std::cout << "graphics pipeline created: " << (*graphicsPipeline != VK_NULL_HANDLE ? "yes" : "no") << '\n';
 	}
 
