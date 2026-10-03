@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -345,6 +346,23 @@ private:
 
 	void createGraphicsPipeline()
 	{
+		// The compiled .spv contains bothn the vertex and fragment entry points,
+		// so a single header module is loaded and reused for both stages.
+		vk::raii::ShaderModule shaderModule = createShaderModule(readFile("shaders/slang.spv"));
+		vk::PipelineShaderStageCreateInfo vertShaderStageInfo{.stage = vk::ShaderStageFlagBits::eVertex, .module = shaderModule, .pName = "vertMain" };
+		vk::PipelineShaderStageCreateInfo fragShaderStageInfo{.stage = vk::ShaderStageFlagBits::eFragment, .module = shaderModule, .pName = "fragMain" };
+		vk::PipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
+
+		// Log that the shader module loaded successfully, for diagnostics.
+		std::cout << "shader module loaded, stages: " << std::size(shaderStages) << '\n';
+	}
+
+	[[nodiscard]] vk::raii::ShaderModule createShaderModule(const std::vector<char> &code) const
+	{
+		vk::ShaderModuleCreateInfo createInfo{ .codeSize = code.size() * sizeof(char), .pCode = reinterpret_cast<const uint32_t *>(code.data())};
+		vk::raii::ShaderModule shaderModule{ device, createInfo };
+
+		return shaderModule;
 	}
 
 	// Pick at least 3 swap chain images (triple buffering), clamped to what the surface allows.
@@ -418,6 +436,22 @@ private:
 		}
 
 		return vk::False;
+	}
+
+	// Read an entire binary file into memory. Opening with std::ios::ate
+	// positions the cursor at the end, so tellg() gives the file size.
+	static std::vector<char> readFile(const std::string &filename)
+	{
+		std::ifstream file(filename, std::ios::ate | std::ios::binary);
+		if (!file.is_open())
+		{
+			throw std::runtime_error("failed to open the specified file!");
+		}
+		std::vector<char> buffer(file.tellg());
+		file.seekg(0, std::ios::beg);
+		file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+		file.close();
+		return buffer;
 	}
 };
 
