@@ -6,6 +6,14 @@
 
 A Vulkan rendering engine in C++, built while learning from the official [Khronos Vulkan Documentation](https://docs.vulkan.org/spec/latest/index.html).
 
+## Current state
+
+Renders a triangle with a Vulkan graphics pipeline.
+
+<p align="center">
+  <img src="screenshots/triangle.png" alt="Triangle rendered with Vulkan" width="650">
+</p>
+
 ## Tech stack
 
 - C++20, Vulkan (via Vulkan-Hpp RAII)
@@ -23,9 +31,10 @@ cmake --build build
 
 ```
 cpp-vulkan-engine/
-├── CMake/     # Custom Find*.cmake modules
-├── assets/    # Models and textures
-└── src/       # Source code and shaders
+├── CMake/        # Custom Find*.cmake modules
+├── assets/       # Models and textures
+├── screenshots/  # Images used in the README
+└── src/          # Source code and shaders
 ```
 
 ## License
