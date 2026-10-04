@@ -52,6 +52,7 @@ private:
 	vk::raii::SurfaceKHR surface = nullptr;
 	vk::raii::PhysicalDevice physicalDevice = nullptr;
 	vk::raii::Device device = nullptr;
+	uint32_t queueIndex = ~0u;
 	vk::raii::Queue queue = nullptr;
 	vk::raii::SwapchainKHR swapChain = nullptr;
 	std::vector<vk::Image> swapChainImages;
@@ -60,6 +61,8 @@ private:
 	std::vector<vk::raii::ImageView> swapChainImageViews;
 	vk::raii::PipelineLayout pipelineLayout = nullptr;
 	vk::raii::Pipeline graphicsPipeline = nullptr;
+	vk::raii::CommandPool commandPool = nullptr;
+	vk::raii::CommandBuffer commandBuffer = nullptr;
 
 	std::vector<const char*> requiredDeviceExtension = {
 		vk::KHRSwapchainExtensionName };
@@ -92,6 +95,8 @@ private:
 		createSwapChain();
 		createImageViews();
 		createGraphicsPipeline();
+		createCommandPool();
+		createCommandBuffer();
 	}
 
 	void mainLoop()
@@ -242,8 +247,8 @@ private:
 		{
 			throw std::runtime_error("failed to find GPUs with Vulkan support!");
 		}
-		physicalDevice = *devIter;
 
+		physicalDevice = *devIter;
 		std::cout << "selected GPU: " << physicalDevice.getProperties().deviceName << '\n';
 	}
 
@@ -252,7 +257,6 @@ private:
 		std::vector<vk::QueueFamilyProperties> queueFamilyProperties = physicalDevice.getQueueFamilyProperties();
 
 		// Locate the first queue family that supports both graphics and presentation.
-		uint32_t queueIndex = ~0u; // ~0u as a sentinel meaning "not found yet"
 		for (uint32_t qfpIndex = 0; qfpIndex < queueFamilyProperties.size(); qfpIndex++)
 		{
 			if ((queueFamilyProperties[qfpIndex].queueFlags & vk::QueueFlagBits::eGraphics) &&
@@ -292,7 +296,6 @@ private:
 
 		device = vk::raii::Device(physicalDevice, deviceCreateInfo);
 		queue = vk::raii::Queue(device, queueIndex, 0);
-
 		std::cout << "graphics queue family index: " << queueIndex << '\n';
 	}
 
@@ -325,7 +328,6 @@ private:
 
 		swapChain = vk::raii::SwapchainKHR(device, swapChainCreateInfo);
 		swapChainImages = swapChain.getImages();
-
 		std::cout << "swap chain images: " << swapChainImages.size()
 				  << ", format: " << to_string(swapChainSurfaceFormat.format)
 			      << ", extent: " << swapChainExtent.width << 'x' << swapChainExtent.height << '\n';
@@ -397,7 +399,6 @@ private:
 		// Empty layout (no descriptor sets, no push constants), but still required by the pipeline.
 		vk::PipelineLayoutCreateInfo pipelineLayoutInfo{ .setLayoutCount = 0, .pushConstantRangeCount = 0 };
 		pipelineLayout = vk::raii::PipelineLayout(device, pipelineLayoutInfo);
-
 		std::cout << "pipeline layout created: " << (*pipelineLayout != VK_NULL_HANDLE ? "yes" : "no") << '\n';
 
 		// Chained PipelineRenderingCreateInfo describes the attachment formats (dynamic rendering),
@@ -419,8 +420,32 @@ private:
 
 		// No pipeline cache (nullptr).
 		graphicsPipeline = vk::raii::Pipeline(device, nullptr, pipelineCreateInfoChain.get<vk::GraphicsPipelineCreateInfo>());
-
 		std::cout << "graphics pipeline created: " << (*graphicsPipeline != VK_NULL_HANDLE ? "yes" : "no") << '\n';
+	}
+
+	void createCommandPool()
+	{
+		vk::CommandPoolCreateInfo poolInfo{
+			// eResetCommandBuffer lets the command buffer be re-recorded every frame.
+			.flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+			.queueFamilyIndex = queueIndex
+		};
+
+		commandPool = vk::raii::CommandPool(device, poolInfo);
+		std::cout << "command pool created: " << (*commandPool != VK_NULL_HANDLE ? "yes" : "no") << '\n';
+	}
+
+	void createCommandBuffer()
+	{
+		vk::CommandBufferAllocateInfo allocInfo{
+			.commandPool = commandPool,
+			// Primary buffers can be submitted to a queue directly.
+			.level = vk::CommandBufferLevel::ePrimary,
+			.commandBufferCount = 1
+		};
+
+		commandBuffer = std::move(vk::raii::CommandBuffers(device, allocInfo).front());
+		std::cout << "command buffer allocated: " << (*commandBuffer != VK_NULL_HANDLE ? "yes" : "no") << '\n';
 	}
 
 	[[nodiscard]] vk::raii::ShaderModule createShaderModule(const std::vector<char> &code) const
