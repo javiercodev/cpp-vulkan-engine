@@ -11,6 +11,8 @@
 #include <vector>
 
 #if defined (__INTELLISENSE__) || !defined(USE_CPP20_MODULES)
+// Report OutOfDate as a result instead of throwing, so drawFrame() can handle it.
+#define VULKAN_HPP_HANDLE_ERROR_OUT_OF_DATE_AS_SUCCESS
 #include <vulkan/vulkan_raii.hpp>
 #else
 import vulkan_hpp;
@@ -74,6 +76,9 @@ private:
 	std::vector<vk::raii::Semaphore> renderFinishedSemaphores;
 	uint32_t frameIndex = 0;
 
+	// Set by the GLFW callback; some platforms do not report a resize as OutOfDate.
+	bool framebufferResized = false;
+
 	std::vector<const char*> requiredDeviceExtension = {
 		vk::KHRSwapchainExtensionName };
 
@@ -84,7 +89,7 @@ private:
 			throw std::runtime_error("failed to initialize GLFW!");
 		}
 		glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-		glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+		glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 		window = glfwCreateWindow(WIDTH, HEIGHT, "VulkanEngine", nullptr, nullptr);
 		if (!window)
 		{
@@ -92,6 +97,14 @@ private:
 			glfwTerminate();
 			throw std::runtime_error("failed to create the window!");
 		}
+		glfwSetWindowUserPointer(window, this);
+		glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
+	}
+
+	static void framebufferResizeCallback(GLFWwindow* window, int width, int height)
+	{
+		auto app = reinterpret_cast<Application*>(glfwGetWindowUserPointer(window));
+		app->framebufferResized = true;
 	}
 
 	void initVulkan()
@@ -116,7 +129,14 @@ private:
 			glfwPollEvents();
 			drawFrame();
 		}
+
 		device.waitIdle(); // Ensure all device operations have completed before destroying resources.
+	}
+
+	void cleanupSwapChain()
+	{
+		swapChainImageViews.clear();
+		swapChain = nullptr;
 	}
 
 	void cleanup()
@@ -124,6 +144,32 @@ private:
 		glfwDestroyWindow(window);
 		glfwTerminate();
 	}
+
+	void recreateSwapChain()
+	{
+		int width = 0, height = 0;
+		glfwGetFramebufferSize(window, &width, &height);
+		// Minimized: wait until the framebuffer has a non-zero size again.
+		while ((width == 0 || height == 0) && !glfwWindowShouldClose(window))
+		{
+			glfwGetFramebufferSize(window, &width, &height);
+			glfwWaitEvents();
+		}
+
+		if (glfwWindowShouldClose(window))
+		{
+			return;
+		}
+
+		device.waitIdle();
+
+		cleanupSwapChain();
+		createSwapChain();
+		createImageViews();
+		// renderFinishedSemaphores are not recreated, so the image count must not change.
+		assert(swapChainImages.size() == renderFinishedSemaphores.size());
+	}
+
 
 	void createInstance()
 	{
@@ -451,6 +497,7 @@ private:
 
 	void createCommandBuffers()
 	{
+		commandBuffers.clear();
 		vk::CommandBufferAllocateInfo allocInfo{
 			.commandPool = commandPool,
 			// Primary buffers can be submitted to a queue directly.
@@ -477,7 +524,7 @@ private:
 			vk::PipelineStageFlagBits2::eColorAttachmentOutput,
 			vk::PipelineStageFlagBits2::eColorAttachmentOutput
 		);
-		// Clear values are linear; the SRGB swap chain converts them, so 0.01 displays as dark gray.
+		// Clear values are linear; the sRGB swap chain converts them, so 0.01 displays as dark gray.
 		vk::ClearValue clearColor = vk::ClearColorValue(0.01f, 0.01f, 0.01f, 1.0f);
 
 		vk::RenderingAttachmentInfo attachmentInfo = {
@@ -571,7 +618,7 @@ private:
 		std::cout << "sync objects created: " << MAX_FRAMES_IN_FLIGHT << " frames in flight, " << renderFinishedSemaphores.size() << " render finished semaphores\n";
 	}
 
-	// Frame: wait for the previous frame, acquire an image, record, submit, present.
+	// Frame: wait for this slot's previous use, acquire an image, record, submit, present.
 	void drawFrame()
 	{
 		auto fenceResult = device.waitForFences(*inFlightFences[frameIndex], vk::True, UINT64_MAX);
@@ -580,9 +627,22 @@ private:
 			throw std::runtime_error("Unable to wait for the fence!");
 		}
 
-		device.resetFences(*inFlightFences[frameIndex]);
-
 		auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *presentCompleteSemaphores[frameIndex], nullptr);
+
+		if (result == vk::Result::eErrorOutOfDateKHR)
+		{
+			recreateSwapChain();
+			return;
+		}
+
+		if (result != vk::Result::eSuccess && result != vk::Result::eSuboptimalKHR)
+		{
+			assert(result == vk::Result::eTimeout || result == vk::Result::eNotReady);
+			throw std::runtime_error("unable to acquire an image from the swap chain!");
+		}
+
+		// Reset only after a successful acquire; returning early with a reset fence would block the next frame.
+		device.resetFences(*inFlightFences[frameIndex]);
 
 		commandBuffers[frameIndex].reset();
 		recordCommandBuffer(imageIndex);
@@ -609,15 +669,13 @@ private:
 		};
 
 		result = queue.presentKHR(presentInfoKHR);
-		switch (result)
+		if ((result == vk::Result::eSuboptimalKHR) || (result == vk::Result::eErrorOutOfDateKHR) || framebufferResized)
 		{
-			case vk::Result::eSuccess:
-				break;
-			case vk::Result::eSuboptimalKHR:
-				std::cout << "vk::Queue::presentKHR returned vk::Result::eSuboptimalKHR !\n";
-				break;
-			default:
-				break;
+			framebufferResized = false;
+			recreateSwapChain();
+		}
+		else {
+			assert(result == vk::Result::eSuccess);
 		}
 
 		frameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT;
