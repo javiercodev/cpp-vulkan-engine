@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <assert.h>
 #include <cstdlib>
 #include <cstring>
@@ -20,6 +21,7 @@ import vulkan_hpp;
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
 
 constexpr uint32_t WIDTH = 800;
 constexpr uint32_t HEIGHT = 600;
@@ -35,6 +37,34 @@ constexpr bool enableValidationLayers = false;
 #else
 constexpr bool enableValidationLayers = true;
 #endif
+
+struct Vertex
+{
+	glm::vec2 pos;
+	glm::vec3 color;
+
+	static vk::VertexInputBindingDescription getBindingDescription()
+	{
+		return { .binding = 0, .stride = sizeof(Vertex), .inputRate = vk::VertexInputRate::eVertex };
+	}
+
+	// location values must match the vertex shader inputs.
+	static std::array<vk::VertexInputAttributeDescription, 2> getAttributeDescriptions()
+	{
+		return {{{.location = 0, .binding = 0, .format = vk::Format::eR32G32Sfloat, .offset = offsetof(Vertex, pos)},
+			{.location = 1, .binding = 0, .format = vk::Format::eR32G32B32Sfloat, .offset = offsetof(Vertex, color)}}};
+	}
+};
+
+// The attribute offsets assume tightly packed data, with no padding between members.
+static_assert(sizeof(Vertex) == 5 * sizeof(float));
+
+const std::vector<Vertex> vertices =
+{
+	{{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+	{{0.5f,  0.5f}, {0.0f, 1.0f, 0.0f}},
+	{{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+};
 
 class Application {
 
@@ -66,6 +96,9 @@ private:
 
 	vk::raii::PipelineLayout pipelineLayout = nullptr;
 	vk::raii::Pipeline graphicsPipeline = nullptr;
+
+	vk::raii::Buffer vertexBuffer = nullptr;
+	vk::raii::DeviceMemory vertexBufferMemory = nullptr;
 
 	vk::raii::CommandPool commandPool = nullptr;
 	// Per frame in flight
@@ -119,6 +152,7 @@ private:
 		createImageViews();
 		createGraphicsPipeline();
 		createCommandPool();
+		createVertexBuffer();
 		createCommandBuffers();
 		createSyncObjects();
 	}
@@ -424,8 +458,16 @@ private:
 
 		std::cout << "shader module loaded, stages: " << std::size(shaderStages) << '\n';
 
-		// No vertex buffers yet: the vertices are hardcoded in the vertex shader.
-		vk::PipelineVertexInputStateCreateInfo vertexInputInfo;
+		
+		auto bindingDescription = Vertex::getBindingDescription();
+		auto attributesDescriptions = Vertex::getAttributeDescriptions();
+		vk::PipelineVertexInputStateCreateInfo vertexInputInfo{
+			.vertexBindingDescriptionCount = 1,
+			.pVertexBindingDescriptions = &bindingDescription,
+			.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributesDescriptions.size()),
+			.pVertexAttributeDescriptions = attributesDescriptions.data()
+		};
+
 		vk::PipelineInputAssemblyStateCreateInfo inputAssembly{.topology = vk::PrimitiveTopology::eTriangleList};
 		// Only the counts are set; viewport and scissor are dynamic and set at draw time.
 		vk::PipelineViewportStateCreateInfo viewportState{.viewportCount = 1, .scissorCount = 1 };
@@ -495,6 +537,50 @@ private:
 		std::cout << "command pool created: " << (*commandPool != VK_NULL_HANDLE ? "yes" : "no") << '\n';
 	}
 
+	void createVertexBuffer()
+	{
+		vk::BufferCreateInfo bufferInfo{
+			.size = sizeof(vertices[0]) * vertices.size(),
+			.usage = vk::BufferUsageFlagBits::eVertexBuffer,
+			.sharingMode = vk::SharingMode::eExclusive
+		};
+
+		vertexBuffer = vk::raii::Buffer(device, bufferInfo);
+
+		vk::MemoryRequirements memRequirements = vertexBuffer.getMemoryRequirements();
+		// HostVisible lets the CPU map the memory; HostCoherent avoids flushing manually after writing.
+		vk::MemoryAllocateInfo memoryAllocateInfo{
+			.allocationSize = memRequirements.size,
+			.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent)
+		};
+
+		vertexBufferMemory = vk::raii::DeviceMemory(device, memoryAllocateInfo);
+		vertexBuffer.bindMemory(*vertexBufferMemory, 0);
+
+		void* data = vertexBufferMemory.mapMemory(0, bufferInfo.size);
+		memcpy(data, vertices.data(), bufferInfo.size);
+		vertexBufferMemory.unmapMemory();
+
+		std::cout << "vertex buffer created: " << bufferInfo.size << " bytes, " << vertices.size() << " vertices\n";
+	}
+
+	// typeFilter is a bitmask of the memory types the buffer accepts; pick one that has all requested properties.
+	uint32_t findMemoryType(uint32_t typeFilter, vk::MemoryPropertyFlags properties)
+	{
+		vk::PhysicalDeviceMemoryProperties memProperties = physicalDevice.getMemoryProperties();
+
+		for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++)
+		{
+			if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties)
+			{
+				return i;
+			}
+		}
+
+		throw std::runtime_error("no suitable memory type was found!");
+
+	}
+
 	void createCommandBuffers()
 	{
 		commandBuffers.clear();
@@ -546,7 +632,8 @@ private:
 		commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, *graphicsPipeline);
 		commandBuffer.setViewport(0, vk::Viewport(0.0f, 0.0f, static_cast<float>(swapChainExtent.width), static_cast<float>(swapChainExtent.height), 0.0f, 1.0f));
 		commandBuffer.setScissor(0, vk::Rect2D(vk::Offset2D(0, 0), swapChainExtent));
-		commandBuffer.draw(3, 1, 0, 0);
+		commandBuffer.bindVertexBuffers(0, *vertexBuffer, { 0 });
+		commandBuffer.draw(static_cast<uint32_t>(vertices.size()), 1, 0, 0);
 		commandBuffer.endRendering();
 
 		// Make the image presentable.
