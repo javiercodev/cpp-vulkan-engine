@@ -8,10 +8,10 @@ A Vulkan rendering engine in C++, built while learning from the official [Khrono
 
 ## Current state
 
-Renders a triangle with a Vulkan graphics pipeline.
+Renders a triangle with per-vertex colors, interpolated by the GPU.
 
 <p align="center">
-  <img src="screenshots/triangle.png" alt="Triangle rendered with Vulkan" width="650">
+  <img src="screenshots/triangle_rgb.png" alt="Triangle rendered with Vulkan" width="650">
 </p>
 
 ## Tech stack
