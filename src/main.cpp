@@ -537,31 +537,47 @@ private:
 		std::cout << "command pool created: " << (*commandPool != VK_NULL_HANDLE ? "yes" : "no") << '\n';
 	}
 
+	std::pair<vk::raii::Buffer, vk::raii::DeviceMemory> createBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage, vk::MemoryPropertyFlags properties)
+	{
+		vk::BufferCreateInfo bufferInfo{.size = size, .usage = usage, .sharingMode = vk::SharingMode::eExclusive};
+		vk::raii::Buffer buffer = vk::raii::Buffer(device, bufferInfo);
+		vk::MemoryRequirements memRequirements = buffer.getMemoryRequirements();
+		vk::MemoryAllocateInfo allocInfo{.allocationSize = memRequirements.size, .memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties)};
+		vk::raii::DeviceMemory bufferMemory = vk::raii::DeviceMemory(device, allocInfo);
+		buffer.bindMemory(*bufferMemory, 0);
+		return {std::move(buffer), std::move(bufferMemory) };
+	}
+
 	void createVertexBuffer()
 	{
-		vk::BufferCreateInfo bufferInfo{
-			.size = sizeof(vertices[0]) * vertices.size(),
-			.usage = vk::BufferUsageFlagBits::eVertexBuffer,
-			.sharingMode = vk::SharingMode::eExclusive
-		};
+		vk::DeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
+		// Staging buffer: CPU-visible memory used only to upload the data to the faster device-local buffer.
+		auto [stagingBuffer, stagingBufferMemory] =
+			createBuffer(bufferSize, vk::BufferUsageFlagBits::eTransferSrc, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
 
-		vertexBuffer = vk::raii::Buffer(device, bufferInfo);
+		void *dataStaging = stagingBufferMemory.mapMemory(0, bufferSize);
+		memcpy(dataStaging, vertices.data(), bufferSize);
+		stagingBufferMemory.unmapMemory();
 
-		vk::MemoryRequirements memRequirements = vertexBuffer.getMemoryRequirements();
-		// HostVisible lets the CPU map the memory; HostCoherent avoids flushing manually after writing.
-		vk::MemoryAllocateInfo memoryAllocateInfo{
-			.allocationSize = memRequirements.size,
-			.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent)
-		};
+		// eTrasnferDst: receives the copy. eDeviceLocal: GPU-only memory, fastest to read while drawing.
+		std::tie(vertexBuffer, vertexBufferMemory) =
+			createBuffer(bufferSize, vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst, vk::MemoryPropertyFlagBits::eDeviceLocal);
+			
+		copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
 
-		vertexBufferMemory = vk::raii::DeviceMemory(device, memoryAllocateInfo);
-		vertexBuffer.bindMemory(*vertexBufferMemory, 0);
+		std::cout << "vertex buffer created: " << bufferSize << " bytes, " << vertices.size() << " vertices\n";
+	}
 
-		void* data = vertexBufferMemory.mapMemory(0, bufferInfo.size);
-		memcpy(data, vertices.data(), bufferInfo.size);
-		vertexBufferMemory.unmapMemory();
-
-		std::cout << "vertex buffer created: " << bufferInfo.size << " bytes, " << vertices.size() << " vertices\n";
+	void copyBuffer(vk::raii::Buffer &srcBuffer, vk::raii::Buffer &dstBuffer, vk::DeviceSize size)
+	{
+		vk::CommandBufferAllocateInfo allocInfo{.commandPool = commandPool, .level = vk::CommandBufferLevel::ePrimary, .commandBufferCount = 1 };
+		vk::raii::CommandBuffer commandCopyBuffer = std::move(device.allocateCommandBuffers(allocInfo).front());
+		commandCopyBuffer.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+		commandCopyBuffer.copyBuffer(*srcBuffer, *dstBuffer, vk::BufferCopy(0, 0, size));
+		commandCopyBuffer.end();
+		queue.submit(vk::SubmitInfo{.commandBufferCount = 1, .pCommandBuffers = &*commandCopyBuffer }, nullptr);
+		// Wait for the copy to finish before the staging buffer is destroyed.
+		queue.waitIdle();
 	}
 
 	// typeFilter is a bitmask of the memory types the buffer accepts; pick one that has all requested properties.
