@@ -8,11 +8,13 @@ A Vulkan rendering engine in C++, built while learning from the official [Khrono
 
 ## Current state
 
-Renders a triangle with per-vertex colors, interpolated by the GPU.
+Renders a rotating quad in perspective, with per-vertex colors and model/view/projection matrices passed through uniform buffers.
 
 <p align="center">
-  <img src="screenshots/triangle_rgb.png" alt="Triangle rendered with Vulkan" width="650">
+  <img src="screenshots/ubo.png" alt="Rotating quad in perspective rendered with Vulkan" width="650">
 </p>
+
+[Watch the demo on YouTube](https://www.youtube.com/watch?v=UeivoR6VOWg)
 
 ## Tech stack
 
