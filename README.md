@@ -8,13 +8,13 @@ A Vulkan rendering engine in C++, built while learning from the official [Khrono
 
 ## Current state
 
-Renders a rotating quad in perspective, with per-vertex colors and model/view/projection matrices passed through uniform buffers.
+Renders a rotating quad in perspective, textured with an image and transformed by model/view/projection matrices passed through uniform buffers.
 
 <p align="center">
-  <img src="screenshots/ubo.png" alt="Rotating quad in perspective rendered with Vulkan" width="650">
+  <img src="screenshots/texture.png" alt="Rotating quad in perspective rendered with Vulkan" width="650">
 </p>
 
-[Watch the demo on YouTube](https://www.youtube.com/watch?v=UeivoR6VOWg)
+[Watch the demo on YouTube](https://www.youtube.com/watch?v=-XPyQug9jhY)
 
 ## Tech stack
 
