@@ -48,6 +48,7 @@ struct Vertex
 {
 	glm::vec2 pos;
 	glm::vec3 color;
+	glm::vec2 texCoord;
 
 	static vk::VertexInputBindingDescription getBindingDescription()
 	{
@@ -55,15 +56,13 @@ struct Vertex
 	}
 
 	// location values must match the vertex shader inputs.
-	static std::array<vk::VertexInputAttributeDescription, 2> getAttributeDescriptions()
+	static std::array<vk::VertexInputAttributeDescription, 3> getAttributeDescriptions()
 	{
 		return {{{.location = 0, .binding = 0, .format = vk::Format::eR32G32Sfloat, .offset = offsetof(Vertex, pos)},
-			{.location = 1, .binding = 0, .format = vk::Format::eR32G32B32Sfloat, .offset = offsetof(Vertex, color)}}};
+			     {.location = 1, .binding = 0, .format = vk::Format::eR32G32B32Sfloat, .offset = offsetof(Vertex, color)},
+				 {.location = 2, .binding = 0, .format = vk::Format::eR32G32Sfloat, .offset = offsetof(Vertex, texCoord)}}};
 	}
 };
-
-// The attribute offsets assume tightly packed data, with no padding between members.
-static_assert(sizeof(Vertex) == 5 * sizeof(float));
 
 struct UniformBufferObject
 {
@@ -74,10 +73,10 @@ struct UniformBufferObject
 
 const std::vector<Vertex> vertices =
 {
-	{{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-	{{0.5f,  -0.5f}, {0.0f, 1.0f, 0.0f}},
-	{{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
-	{{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}}
+	{{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
+	{{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+	{{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
+	{{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}}
 };
 
 // Two trinagles sharing vertices 0 and 2 from the quad.
@@ -482,16 +481,19 @@ private:
 
 	void createDescriptorSetLayout()
 	{
-		vk::DescriptorSetLayoutBinding uboLayoutBinding{
-			.binding = 0,
-			.descriptorType = vk::DescriptorType::eUniformBuffer,
-			.descriptorCount = 1,
-			.stageFlags = vk::ShaderStageFlagBits::eVertex
-		};
+		std::array<vk::DescriptorSetLayoutBinding, 2> bindings{
+			{{.binding = 0,
+			  .descriptorType = vk::DescriptorType::eUniformBuffer,
+			  .descriptorCount = 1,
+			  .stageFlags = vk::ShaderStageFlagBits::eVertex},
+			 {.binding = 1,
+			 .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+			 .descriptorCount = 1,
+			 .stageFlags = vk::ShaderStageFlagBits::eFragment}}};
 
 		vk::DescriptorSetLayoutCreateInfo layoutInfo{
-			.bindingCount = 1,
-			.pBindings = &uboLayoutBinding
+			.bindingCount = static_cast<uint32_t>(bindings.size()),
+			.pBindings = bindings.data()
 		};
 
 		descriptorSetLayout = vk::raii::DescriptorSetLayout(device, layoutInfo);
@@ -834,43 +836,66 @@ private:
 
 	void createDescriptorPool()
 	{
-		vk::DescriptorPoolSize poolSize{ .type = vk::DescriptorType::eUniformBuffer, .descriptorCount = MAX_FRAMES_IN_FLIGHT };
-		// eFreeDescriptorSet is required because vk::raii::DescriptorSet frees each set on destruction.
+		std::array<vk::DescriptorPoolSize, 2> poolSize{
+			{{.type = vk::DescriptorType::eUniformBuffer,
+			.descriptorCount = MAX_FRAMES_IN_FLIGHT},
+			{.type = vk::DescriptorType::eCombinedImageSampler,
+			.descriptorCount = MAX_FRAMES_IN_FLIGHT}}
+		};
+
 		vk::DescriptorPoolCreateInfo poolInfo{
 			.flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet,
-			.maxSets = MAX_FRAMES_IN_FLIGHT,
-			.poolSizeCount = 1,
-			.pPoolSizes = &poolSize
-		};
+	        .maxSets = MAX_FRAMES_IN_FLIGHT,
+			.poolSizeCount = static_cast<uint32_t>(poolSize.size()),
+			.pPoolSizes = poolSize.data()};
+
 		descriptorPool = vk::raii::DescriptorPool(device, poolInfo);
 	}
 
 	void createDescriptorSets()
 	{
 
-		std::vector<vk::DescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, *descriptorSetLayout);
+		std::vector<vk::DescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, descriptorSetLayout);
 		vk::DescriptorSetAllocateInfo allocInfo{
 			.descriptorPool = descriptorPool,
 			.descriptorSetCount = static_cast<uint32_t>(layouts.size()),
 			.pSetLayouts = layouts.data()
 		};
 
+		descriptorSets.clear();
 		descriptorSets = device.allocateDescriptorSets(allocInfo);
-
 
 		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
 		{
-			vk::DescriptorBufferInfo bufferInfo{ .buffer = uniformBuffers[i], .offset = 0, .range = sizeof(UniformBufferObject)};
-			vk::WriteDescriptorSet   descriptorWrite{ 
-				.dstSet = descriptorSets[i],
-			    .dstBinding = 0,
-				.dstArrayElement = 0,
-				.descriptorCount = 1,
-				.descriptorType = vk::DescriptorType::eUniformBuffer,
-				.pBufferInfo = &bufferInfo
+			vk::DescriptorBufferInfo bufferInfo{
+				.buffer = uniformBuffers[i],
+				.offset = 0,
+				.range = sizeof(UniformBufferObject)
 			};
 
-			device.updateDescriptorSets(descriptorWrite, {});
+			// Must match the layout createTextureImage() left the image in.
+			vk::DescriptorImageInfo imageInfo{
+				.sampler = textureSampler,
+				.imageView = textureImageView,
+				.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal
+			};
+
+			std::array<vk::WriteDescriptorSet, 2> descriptorWrites{
+				{{.dstSet = descriptorSets[i],
+				  .dstBinding = 0,
+				  .dstArrayElement = 0,
+				  .descriptorCount = 1,
+				  .descriptorType = vk::DescriptorType::eUniformBuffer,
+				  .pBufferInfo = &bufferInfo},
+				{.dstSet = descriptorSets[i],
+				 .dstBinding = 1,
+				 .dstArrayElement = 0,
+				 .descriptorCount = 1,
+				 .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+				 .pImageInfo = &imageInfo}}
+			};
+
+			device.updateDescriptorSets(descriptorWrites, {});
 		}
 
 		std::cout << "descriptor sets created: " << descriptorSets.size() << '\n';
