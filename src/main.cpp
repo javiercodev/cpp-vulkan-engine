@@ -25,14 +25,22 @@ import vulkan_hpp;
 #define GLM_FORCE_RADIANS
 // Vulkan's depth range is 0 to 1 (OpenGL's is -1 to 1).
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
+// glm/gtx/hash.hpp is an experimental GLM extension.
+#define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtx/hash.hpp>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+#define TINYOBJLOADER_IMPLEMENTATION
+#include <tiny_obj_loader.h>
+
 constexpr uint32_t WIDTH = 800;
 constexpr uint32_t HEIGHT = 600;
+const std::string MODEL_PATH = "models/model.obj"; 
+const std::string TEXTURE_PATH = "textures/texture.png";
 // Number of frames the CPU may record ahead while the GPU is still rendering.
 constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 2;
 
@@ -64,34 +72,29 @@ struct Vertex
 			     {.location = 1, .binding = 0, .format = vk::Format::eR32G32B32Sfloat, .offset = offsetof(Vertex, color)},
 				 {.location = 2, .binding = 0, .format = vk::Format::eR32G32Sfloat, .offset = offsetof(Vertex, texCoord)}}};
 	}
+
+	bool operator==(const Vertex& other) const
+	{
+		return pos == other.pos && color == other.color && texCoord == other.texCoord;
+	}
 };
 
-// The attribute offsets assume tightly packed data, with no padding.
-static_assert(sizeof(Vertex) == 8 * sizeof(float));
+// Lets Vertex be used as an unordered_map key (see loadModel()).
+template<>
+struct std::hash<Vertex>
+{
+	size_t operator()(Vertex const& vertex) const noexcept
+	{
+		return  ((hash<glm::vec3>()(vertex.pos) ^ (hash<glm::vec3>()(vertex.color) << 1)) >> 1) ^ (hash<glm::vec2>()(vertex.texCoord) << 1);
+	}
+};
+
 
 struct UniformBufferObject
 {
-	glm::mat4 model;
-	glm::mat4 view;
-	glm::mat4 proj;
-};
-
-const std::vector<Vertex> vertices =
-{
-	{{-0.5f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
-	{{0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
-	{{0.5f, 0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
-	{{-0.5f, 0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}},
-
-	{{-0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
-	{{0.5f, -0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
-	{{0.5f, 0.5f, -0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
-	{{-0.5f, 0.5f, -0.5f}, {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}}
-};
-
-// Two triangles per quad, sharing two of its vertices.
-const std::vector<uint16_t> indices = {
-	0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4
+	alignas(16) glm::mat4 model;
+	alignas(16) glm::mat4 view;
+	alignas(16) glm::mat4 proj;
 };
 
 class Application {
@@ -135,6 +138,9 @@ private:
 	vk::raii::ImageView textureImageView = nullptr;
 	vk::raii::Sampler textureSampler = nullptr;
 
+	std::vector<Vertex> vertices;
+	std::vector<uint32_t> indices;
+
 	vk::raii::Buffer vertexBuffer = nullptr;
 	vk::raii::DeviceMemory vertexBufferMemory = nullptr;
 	vk::raii::Buffer indexBuffer = nullptr;
@@ -161,9 +167,7 @@ private:
 	bool framebufferResized = false;
 
 	std::vector<const char*> requiredDeviceExtension = {
-		vk::KHRSwapchainExtensionName,
-		vk::KHRSpirv14ExtensionName,
-		vk::KHRSynchronization2ExtensionName
+		vk::KHRSwapchainExtensionName
 	};
 
 	void initWindow()
@@ -208,6 +212,7 @@ private:
 		createTextureImage();
 		createTextureImageView();
 		createTextureSampler();
+		loadModel();
 		createVertexBuffer();
 		createIndexBuffer();
 		createUniformBuffers();
@@ -242,11 +247,12 @@ private:
 	void recreateSwapChain()
 	{
 		int width = 0, height = 0;
+		glfwGetFramebufferSize(window, &width, &height);
 		// Minimized: wait until the framebuffer has a non-zero size again.
 		while ((width == 0 || height == 0) && !glfwWindowShouldClose(window))
 		{
-			glfwGetFramebufferSize(window, &width, &height);
 			glfwWaitEvents();
+			glfwGetFramebufferSize(window, &width, &height);
 		}
 
 		if (glfwWindowShouldClose(window))
@@ -419,6 +425,7 @@ private:
 				break;
 			}
 		}
+
 		if (queueIndex == ~0u)
 		{
 			throw std::runtime_error("No queue family supports both graphics and presentation; terminating.");
@@ -633,7 +640,7 @@ private:
 		std::cout << "depth buffer created: " << to_string(depthFormat) << ", " << swapChainExtent.width << 'x' << swapChainExtent.height << '\n';
 	}
 
-	vk::Format findSupportedFormat(const std::vector<vk::Format>& candidates, vk::ImageTiling tiling, vk::FormatFeatureFlags features)
+	vk::Format findSupportedFormat(const std::vector<vk::Format>& candidates, vk::ImageTiling tiling, vk::FormatFeatureFlags features) const 
 	{
 		for (const auto format : candidates)
 		{
@@ -648,7 +655,7 @@ private:
 		throw std::runtime_error("can't find supported format!");
 	}
 
-	vk::Format findDepthFormat()
+	[[nodiscard]] vk::Format findDepthFormat() const
 	{
 		return findSupportedFormat({ vk::Format::eD32Sfloat, vk::Format::eD32SfloatS8Uint, vk::Format::eD24UnormS8Uint},
 			vk::ImageTiling::eOptimal,
@@ -658,14 +665,15 @@ private:
 	void createTextureImage()
 	{
 		int texWidth, texHeight, texChannels;
-		stbi_uc *pixels = stbi_load("textures/texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-		// 4 bytes per pixel (RGBA), since STBI_rgb_alpha forces 4 channels.
-		vk::DeviceSize imageSize = texWidth * texHeight * 4;
+		stbi_uc *pixels = stbi_load(TEXTURE_PATH.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
 
 		if (!pixels)
 		{
 			throw std::runtime_error("unable to load the texture!");
 		}
+
+		// 4 bytes per pixel (RGBA), since STBI_rgb_alpha forces 4 channels.
+		vk::DeviceSize imageSize = texWidth * texHeight * 4;
 
 		auto [stagingBuffer, stagingBufferMemory] = 
 			createBuffer(imageSize, vk::BufferUsageFlagBits::eTransferSrc, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
@@ -830,6 +838,62 @@ private:
 		commandBuffer.copyBufferToImage(buffer, image, vk::ImageLayout::eTransferDstOptimal, region);
 	}
 
+	void loadModel()
+	{
+		tinyobj::attrib_t attrib;
+		std::vector<tinyobj::shape_t> shapes;
+		std::vector<tinyobj::material_t> materials;
+		std::string warn, err;
+
+		if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, MODEL_PATH.c_str()))
+		{
+			throw std::runtime_error(warn + err);
+		}
+
+		// Reuse identical vertices (same position, color and texture coordinates) instead of duplicating them.
+		std::unordered_map<Vertex, uint32_t> uniqueVertices{};
+
+		for (const auto &shape : shapes)
+		{
+			for (const auto &index : shape.mesh.indices)
+			{
+				Vertex vertex{};
+
+				vertex.pos = {
+					attrib.vertices[3 * index.vertex_index + 0],
+					attrib.vertices[3 * index.vertex_index + 1],
+					attrib.vertices[3 * index.vertex_index + 2]
+				};
+
+				if (index.texcoord_index >= 0)
+				{
+					vertex.texCoord = {
+						attrib.texcoords[2 * index.texcoord_index + 0],
+						// The OBJ's V axis points up and Vulkan's points down, so it is flipped.
+						1.0f - attrib.texcoords[2 * index.texcoord_index + 1]
+					};
+				}
+
+				// The OBJ has no vertex colors: white leaves the texture color unchanged.
+				vertex.color = { 1.0f, 1.0f, 1.0f };
+
+				auto [it, inserted] = uniqueVertices.insert({
+					vertex,
+					static_cast<uint32_t>(vertices.size())
+				});
+
+				if (inserted)
+				{
+					vertices.push_back(vertex);
+				}
+
+				indices.push_back(it->second);
+			}
+		}
+
+		std::cout << "model loaded: " << vertices.size() << " unique vertices, " << indices.size() << " indices (" << indices.size() / 3 << " triangles)\n";
+	}
+
 	void createVertexBuffer()
 	{
 		vk::DeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
@@ -975,7 +1039,7 @@ private:
 		vk::CommandBufferBeginInfo beginInfo{.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit};
 		commandBuffer.begin(beginInfo);
 
-		return std::move(commandBuffer);
+		return commandBuffer;
 	}
 
 	void endSingleTimeCommands(vk::raii::CommandBuffer &&commandBuffer)
@@ -1062,7 +1126,6 @@ private:
 			.imageView = swapChainImageViews[imageIndex],
 			.imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
 			.loadOp = vk::AttachmentLoadOp::eClear,
-			// Depth is only needed while drawing, not afterwards.
 			.storeOp = vk::AttachmentStoreOp::eStore,
 			.clearValue = clearColor
 		};
@@ -1071,6 +1134,7 @@ private:
 			.imageView = depthImageView,
 			.imageLayout = vk::ImageLayout::eDepthAttachmentOptimal,
 			.loadOp = vk::AttachmentLoadOp::eClear,
+			// Depth is only needed while drawing, not afterwards.
 			.storeOp = vk::AttachmentStoreOp::eDontCare,
 			.clearValue = clearDepth
 		};
@@ -1165,7 +1229,7 @@ private:
 		std::cout << "sync objects created: " << MAX_FRAMES_IN_FLIGHT << " frames in flight, " << renderFinishedSemaphores.size() << " render finished semaphores\n";
 	}
 
-	void updateUniformBuffer(uint32_t currentImage)
+	void updateUniformBuffer(uint32_t currentImage) const
 	{
 		static auto startTime = std::chrono::high_resolution_clock::now();
 
@@ -1301,7 +1365,7 @@ private:
 	}
 
 	// Combine GLFW's required extensions with the debug extension, if validation layers are enabled.
-	std::vector<const char*> getRequiredInstanceExtensions() const
+	[[nodiscard]]std::vector<const char*> getRequiredInstanceExtensions() const
 	{
 		uint32_t glfwExtensionCount = 0;
 		auto glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
