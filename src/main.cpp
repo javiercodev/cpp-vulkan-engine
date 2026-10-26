@@ -39,8 +39,8 @@ import vulkan_hpp;
 
 constexpr uint32_t WIDTH = 800;
 constexpr uint32_t HEIGHT = 600;
-const std::string MODEL_PATH = "models/model.obj"; 
-const std::string TEXTURE_PATH = "textures/texture.png";
+const std::string MODEL_PATH = "models/ellie.obj"; 
+const std::string TEXTURE_PATH = "textures/ellie.png";
 // Number of frames the CPU may record ahead while the GPU is still rendering.
 constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 2;
 
@@ -133,6 +133,7 @@ private:
 	vk::raii::DeviceMemory depthImageMemory = nullptr;
 	vk::raii::ImageView depthImageView = nullptr;
 
+	uint32_t mipLevels = 0;
 	vk::raii::Image textureImage = nullptr;
 	vk::raii::DeviceMemory textureImageMemory= nullptr;
 	vk::raii::ImageView textureImageView = nullptr;
@@ -497,7 +498,7 @@ private:
 
 		for (auto &image : swapChainImages)
 		{
-			swapChainImageViews.emplace_back(createImageView(image, swapChainSurfaceFormat.format, vk::ImageAspectFlagBits::eColor));
+			swapChainImageViews.emplace_back(createImageView(image, swapChainSurfaceFormat.format, vk::ImageAspectFlagBits::eColor, 1));
 		}
 
 		std::cout << "image views created: " << swapChainImageViews.size() << '\n';
@@ -634,8 +635,8 @@ private:
 	{
 		vk::Format depthFormat = findDepthFormat();
 
-		std::tie(depthImage, depthImageMemory) = createImage(swapChainExtent.width, swapChainExtent.height, depthFormat, vk::ImageTiling::eOptimal, vk::ImageUsageFlagBits::eDepthStencilAttachment, vk::MemoryPropertyFlagBits::eDeviceLocal);
-		depthImageView = createImageView(depthImage, depthFormat, vk::ImageAspectFlagBits::eDepth);
+		std::tie(depthImage, depthImageMemory) = createImage(swapChainExtent.width, swapChainExtent.height, 1, depthFormat, vk::ImageTiling::eOptimal, vk::ImageUsageFlagBits::eDepthStencilAttachment, vk::MemoryPropertyFlagBits::eDeviceLocal);
+		depthImageView = createImageView(depthImage, depthFormat, vk::ImageAspectFlagBits::eDepth, 1);
 
 		std::cout << "depth buffer created: " << to_string(depthFormat) << ", " << swapChainExtent.width << 'x' << swapChainExtent.height << '\n';
 	}
@@ -675,6 +676,9 @@ private:
 		// 4 bytes per pixel (RGBA), since STBI_rgb_alpha forces 4 channels.
 		vk::DeviceSize imageSize = texWidth * texHeight * 4;
 
+		// Number of times the largest side can be halved until it reaches 1, plus the base level.
+		mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(texWidth, texHeight)))) + 1;
+
 		auto [stagingBuffer, stagingBufferMemory] = 
 			createBuffer(imageSize, vk::BufferUsageFlagBits::eTransferSrc, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
 
@@ -687,25 +691,99 @@ private:
 		std::tie(textureImage, textureImageMemory) = createImage (
 			texWidth,
 			texHeight,
+			mipLevels,
 			// sRGB because the image file is stored in sRGB; the GPU converts it to linear when sampling.
 			vk::Format::eR8G8B8A8Srgb,
 			vk::ImageTiling::eOptimal,
-			vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+			//eTransferSrc: each mip level is the blit source for the next one.
+			vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
 			vk::MemoryPropertyFlagBits::eDeviceLocal
 		);
 
 		vk::raii::CommandBuffer commandBuffer = beginSingleTimeCommands();
-		transitionImageLayout(commandBuffer, textureImage, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal);
+		transitionImageLayout(commandBuffer, textureImage, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal, mipLevels);
 		copyBufferToImage(commandBuffer, stagingBuffer, textureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
-		transitionImageLayout(commandBuffer, textureImage, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal);
+		generateMipmaps(commandBuffer, textureImage, vk::Format::eR8G8B8A8Srgb, texWidth, texHeight, mipLevels);
 		endSingleTimeCommands(std::move(commandBuffer));
 
-		std::cout << "texture image created: " << texWidth << "x" << texHeight << '\n';
+		std::cout << "texture image created: " << texWidth << "x" << texHeight << ", " << mipLevels << " mip levels\n";
+	}
+
+	// Each level is a linearly filtered, half-size copy of the previous one.
+	// The levels end up in eShaderReadOnlyOptimal here, so createTextureImage() needs no final transition.
+	void generateMipmaps(vk::raii::CommandBuffer& commandBuffer,
+		vk::raii::Image& image,
+		vk::Format imageFormat,
+		int32_t texWidth,
+		int32_t texHeight,
+		uint32_t mipLevels)
+	{
+		// Check if image format supports linear blitting
+		vk::FormatProperties formatProperties = physicalDevice.getFormatProperties(imageFormat);
+		if (!(formatProperties.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImageFilterLinear))
+		{
+			throw std::runtime_error("texture incompatible with linear blitting!");
+		}
+
+		vk::ImageMemoryBarrier barrier = {.srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+										  .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+										  .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+										  .newLayout = vk::ImageLayout::eTransferSrcOptimal,
+										  .srcQueueFamilyIndex = vk::QueueFamilyIgnored,
+										  .dstQueueFamilyIndex = vk::QueueFamilyIgnored,
+										  .image = image,
+										  .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 1}
+		};
+
+		int32_t mipWidth = texWidth;
+		int32_t mipHeight = texHeight;
+
+		for (uint32_t i = 1; i < mipLevels; i++)
+		{
+			barrier.subresourceRange.baseMipLevel = i - 1;
+			barrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+			barrier.newLayout = vk::ImageLayout::eTransferSrcOptimal;
+			barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+			barrier.dstAccessMask = vk::AccessFlagBits::eTransferRead;
+
+			commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, barrier);
+
+			vk::ImageBlit blit = { .srcSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .mipLevel = i - 1, .layerCount = 1},
+								  .srcOffsets = std::array<vk::Offset3D, 2>({{}, {mipWidth, mipHeight, 1}}),
+								  .dstSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .mipLevel = i, .layerCount = 1},
+								  .dstOffsets = std::array<vk::Offset3D, 2>({{}, {1 < mipWidth ? mipWidth / 2 : 1, 1 < mipHeight ? mipHeight / 2 : 1, 1}}) };
+
+			commandBuffer.blitImage(image, vk::ImageLayout::eTransferSrcOptimal, image, vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eLinear);
+
+			barrier.oldLayout = vk::ImageLayout::eTransferSrcOptimal;
+			barrier.newLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+			barrier.srcAccessMask = vk::AccessFlagBits::eTransferRead;
+			barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+
+			commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eFragmentShader, {}, {}, {}, barrier);
+
+			if (1 < mipWidth)
+			{
+				mipWidth /= 2;
+			}
+			if (1 < mipHeight)
+			{
+				mipHeight /= 2;
+			}
+		}
+
+		barrier.subresourceRange.baseMipLevel = mipLevels - 1;
+		barrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+		barrier.newLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+		barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+		barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+
+		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eFragmentShader, {}, {}, {}, barrier);
 	}
 
 	void createTextureImageView()
 	{
-		textureImageView = createImageView(*textureImage, vk::Format::eR8G8B8A8Srgb, vk::ImageAspectFlagBits::eColor);
+		textureImageView = createImageView(*textureImage, vk::Format::eR8G8B8A8Srgb, vk::ImageAspectFlagBits::eColor, mipLevels);
 
 		std::cout << "texture image view created: " << (*textureImageView != VK_NULL_HANDLE ? "yes" : "no") << '\n';
 	}
@@ -725,7 +803,9 @@ private:
 			.anisotropyEnable = vk::True,
 			.maxAnisotropy = properties.limits.maxSamplerAnisotropy,
 			.compareEnable = vk::False,
-			.compareOp = vk::CompareOp::eAlways
+			.compareOp = vk::CompareOp::eAlways,
+			.minLod = 0.0f,
+			.maxLod = vk::LodClampNone
 		};
 
 		textureSampler = vk::raii::Sampler(device, samplerInfo);
@@ -733,17 +813,17 @@ private:
 		std::cout << "texture sampler created: max anisotropy " << properties.limits.maxSamplerAnisotropy << '\n';
 	}
 
-	vk::raii::ImageView createImageView(vk::Image const &image, vk::Format format, vk::ImageAspectFlags aspectFlags)
+	vk::raii::ImageView createImageView(vk::Image const &image, vk::Format format, vk::ImageAspectFlags aspectFlags, uint32_t mipLevels) const
 	{
 		vk::ImageViewCreateInfo viewInfo{
 			.image = image,
 			.viewType = vk::ImageViewType::e2D,
 			.format = format,
-			// No mipmaps (1 level) and a single layer; the caller picks the aspect (color or depth).
+			// A single layer; the caller picks the aspect (color or depth) and the number of mip levels.
 			.subresourceRange = {
 				.aspectMask = aspectFlags,
 				.baseMipLevel = 0,
-				.levelCount = 1,
+				.levelCount = mipLevels,
 				.baseArrayLayer = 0,
 				.layerCount = 1}
 		};
@@ -752,18 +832,19 @@ private:
 	}
 
 	std::pair<vk::raii::Image, vk::raii::DeviceMemory> createImage(
-		uint32_t width, uint32_t height, vk::Format format, vk::ImageTiling tiling, vk::ImageUsageFlags usage, vk::MemoryPropertyFlags properties)
+		uint32_t width, uint32_t height, uint32_t mipLevels, vk::Format format, vk::ImageTiling tiling, vk::ImageUsageFlags usage, vk::MemoryPropertyFlags properties)
 	{
 		vk::ImageCreateInfo imageInfo{
 			.imageType = vk::ImageType::e2D,
 			.format = format,
 			.extent = {width, height, 1},
-			.mipLevels = 1,
+			.mipLevels = mipLevels,
 			.arrayLayers = 1,
 			.samples = vk::SampleCountFlagBits::e1,
 			.tiling = tiling,
 			.usage = usage,
-			.sharingMode = vk::SharingMode::eExclusive
+			.sharingMode = vk::SharingMode::eExclusive,
+			.initialLayout = vk::ImageLayout::eUndefined
 		};
 
 		vk::raii::Image image = vk::raii::Image(device, imageInfo);
@@ -781,7 +862,7 @@ private:
 		return { std::move(image), std::move(imageMemory) };
 	}
 
-	void transitionImageLayout(vk::raii::CommandBuffer &commandBuffer, const vk::raii::Image &image, vk::ImageLayout oldLayout, vk::ImageLayout newLayout)
+	void transitionImageLayout(vk::raii::CommandBuffer &commandBuffer, const vk::raii::Image const &image, vk::ImageLayout oldLayout, vk::ImageLayout newLayout, uint32_t mipLevels)
 	{
 		vk::ImageMemoryBarrier barrier{
 			.oldLayout = oldLayout,
@@ -790,7 +871,7 @@ private:
 			.dstQueueFamilyIndex = vk::QueueFamilyIgnored,
 			.image = image,
 			.subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor,
-				.levelCount = 1,
+				.levelCount = mipLevels,
 				.layerCount = 1}
 		};
 

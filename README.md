@@ -8,7 +8,7 @@ A Vulkan rendering engine in C++, built while learning from the official [Khrono
 
 ## Current state
 
-Loads an OBJ model with its texture and renders it rotating in perspective, with depth testing.
+Loads an OBJ model with its mipmapped texture and renders it rotating in perspective, with depth testing.
 
 <p align="center">
   <img src="screenshots/cat.png" alt="Textured cat model loaded from an OBJ file and rendered with Vulkan" width="650">
