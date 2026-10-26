@@ -39,8 +39,8 @@ import vulkan_hpp;
 
 constexpr uint32_t WIDTH = 800;
 constexpr uint32_t HEIGHT = 600;
-const std::string MODEL_PATH = "models/ellie.obj"; 
-const std::string TEXTURE_PATH = "textures/ellie.png";
+const std::string MODEL_PATH = "models/model.obj"; 
+const std::string TEXTURE_PATH = "textures/model.png";
 // Number of frames the CPU may record ahead while the GPU is still rendering.
 constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 2;
 
@@ -116,6 +116,7 @@ private:
 	vk::raii::DebugUtilsMessengerEXT debugMessenger = nullptr;
 	vk::raii::SurfaceKHR surface = nullptr;
 	vk::raii::PhysicalDevice physicalDevice = nullptr;
+	vk::SampleCountFlagBits msaa = vk::SampleCountFlagBits::e1;
 	vk::raii::Device device = nullptr;
 	uint32_t queueIndex = ~0u;
 	vk::raii::Queue queue = nullptr;
@@ -128,6 +129,10 @@ private:
 	vk::raii::DescriptorSetLayout descriptorSetLayout = nullptr;
 	vk::raii::PipelineLayout pipelineLayout = nullptr;
 	vk::raii::Pipeline graphicsPipeline = nullptr;
+
+	vk::raii::Image colorImage = nullptr;
+	vk::raii::DeviceMemory colorImageMemory = nullptr;
+	vk::raii::ImageView colorImageView = nullptr;
 
 	vk::raii::Image depthImage = nullptr;
 	vk::raii::DeviceMemory depthImageMemory = nullptr;
@@ -209,6 +214,7 @@ private:
 		createDescriptorSetLayout();
 		createGraphicsPipeline();
 		createCommandPool();
+		createColorResources();
 		createDepthResources();
 		createTextureImage();
 		createTextureImageView();
@@ -266,7 +272,8 @@ private:
 		cleanupSwapChain();
 		createSwapChain();
 		createImageViews();
-		// The depth image depends on the swap chain extent, so it is recreated with it.
+		// The color and depth images depend on the swap chain extent, so they are recreated with it.
+		createColorResources();
 		createDepthResources();
 	}
 
@@ -408,6 +415,7 @@ private:
 		}
 
 		physicalDevice = *devIter;
+		msaa = getMaxUsableSampleCount();
 		std::cout << "selected GPU: " << physicalDevice.getProperties().deviceName << '\n';
 	}
 
@@ -560,7 +568,8 @@ private:
 			.lineWidth = 1.0f
 		};
 
-		vk::PipelineMultisampleStateCreateInfo multisampling{ .rasterizationSamples = vk::SampleCountFlagBits::e1, .sampleShadingEnable = vk::False};
+		// Must match the sample count of the color and depth attachments.
+		vk::PipelineMultisampleStateCreateInfo multisampling{.rasterizationSamples = msaa, .sampleShadingEnable = vk::False};
 
 		vk::PipelineDepthStencilStateCreateInfo depthStencil{
 			.depthTestEnable = vk::True,
@@ -631,12 +640,52 @@ private:
 		std::cout << "command pool created: " << (*commandPool != VK_NULL_HANDLE ? "yes" : "no") << '\n';
 	}
 
+	void createColorResources()
+	{
+		vk::Format colorFormat = swapChainSurfaceFormat.format;
+
+		std::tie(colorImage, colorImageMemory) = createImage(
+			swapChainExtent.width,
+			swapChainExtent.height,
+			1,
+			msaa,
+			colorFormat,
+			vk::ImageTiling::eOptimal,
+			// The multisampled image only lives during rendering; its result is resolved into the swap chain image.
+			vk::ImageUsageFlagBits::eTransientAttachment | vk::ImageUsageFlagBits::eColorAttachment,
+			vk::MemoryPropertyFlagBits::eDeviceLocal
+		);
+
+		colorImageView = createImageView(
+			colorImage,
+			colorFormat,
+			vk::ImageAspectFlagBits::eColor,
+			1);
+
+		std::cout << "color buffer created: " << to_string(msaa) << " samples, " << swapChainExtent.width << 'x' << swapChainExtent.height << '\n';
+	}
+
 	void createDepthResources()
 	{
 		vk::Format depthFormat = findDepthFormat();
 
-		std::tie(depthImage, depthImageMemory) = createImage(swapChainExtent.width, swapChainExtent.height, 1, depthFormat, vk::ImageTiling::eOptimal, vk::ImageUsageFlagBits::eDepthStencilAttachment, vk::MemoryPropertyFlagBits::eDeviceLocal);
-		depthImageView = createImageView(depthImage, depthFormat, vk::ImageAspectFlagBits::eDepth, 1);
+		std::tie(depthImage, depthImageMemory) = createImage(
+			swapChainExtent.width,
+			swapChainExtent.height,
+			1,
+			msaa,
+			depthFormat,
+			vk::ImageTiling::eOptimal,
+			vk::ImageUsageFlagBits::eDepthStencilAttachment,
+			vk::MemoryPropertyFlagBits::eDeviceLocal
+		);
+
+		depthImageView = createImageView(
+			depthImage,
+			depthFormat,
+			vk::ImageAspectFlagBits::eDepth,
+			1
+		);
 
 		std::cout << "depth buffer created: " << to_string(depthFormat) << ", " << swapChainExtent.width << 'x' << swapChainExtent.height << '\n';
 	}
@@ -646,8 +695,11 @@ private:
 		for (const auto format : candidates)
 		{
 			vk::FormatProperties props = physicalDevice.getFormatProperties(format);
-			if (((tiling == vk::ImageTiling::eLinear) && ((props.linearTilingFeatures & features) == features)) ||
-				((tiling == vk::ImageTiling::eOptimal) && ((props.optimalTilingFeatures & features) == features)))
+			if (tiling == vk::ImageTiling::eLinear && (props.linearTilingFeatures & features) == features)
+			{
+				return format;
+			}
+			if (tiling == vk::ImageTiling::eOptimal && (props.optimalTilingFeatures & features) == features)
 			{
 				return format;
 			}
@@ -692,6 +744,7 @@ private:
 			texWidth,
 			texHeight,
 			mipLevels,
+			vk::SampleCountFlagBits::e1,
 			// sRGB because the image file is stored in sRGB; the GPU converts it to linear when sampling.
 			vk::Format::eR8G8B8A8Srgb,
 			vk::ImageTiling::eOptimal,
@@ -781,6 +834,39 @@ private:
 		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eFragmentShader, {}, {}, {}, barrier);
 	}
 
+	vk::SampleCountFlagBits getMaxUsableSampleCount()
+	{
+		vk::PhysicalDeviceProperties physicalDeviceProperties = physicalDevice.getProperties();
+
+		vk::SampleCountFlags counts = physicalDeviceProperties.limits.framebufferColorSampleCounts & physicalDeviceProperties.limits.framebufferDepthSampleCounts;
+		if (counts & vk::SampleCountFlagBits::e64)
+		{
+			return vk::SampleCountFlagBits::e64;
+		}
+		if (counts & vk::SampleCountFlagBits::e32)
+		{
+			return vk::SampleCountFlagBits::e32;
+		}
+		if (counts & vk::SampleCountFlagBits::e16)
+		{
+			return vk::SampleCountFlagBits::e16;
+		}
+		if (counts & vk::SampleCountFlagBits::e8)
+		{
+			return vk::SampleCountFlagBits::e8;
+		}
+		if (counts & vk::SampleCountFlagBits::e4)
+		{
+			return vk::SampleCountFlagBits::e4;
+		}
+		if (counts & vk::SampleCountFlagBits::e2)
+		{
+			return vk::SampleCountFlagBits::e2;
+		}
+
+		return vk::SampleCountFlagBits::e1;
+	}
+
 	void createTextureImageView()
 	{
 		textureImageView = createImageView(*textureImage, vk::Format::eR8G8B8A8Srgb, vk::ImageAspectFlagBits::eColor, mipLevels);
@@ -803,9 +889,7 @@ private:
 			.anisotropyEnable = vk::True,
 			.maxAnisotropy = properties.limits.maxSamplerAnisotropy,
 			.compareEnable = vk::False,
-			.compareOp = vk::CompareOp::eAlways,
-			.minLod = 0.0f,
-			.maxLod = vk::LodClampNone
+			.compareOp = vk::CompareOp::eAlways
 		};
 
 		textureSampler = vk::raii::Sampler(device, samplerInfo);
@@ -832,7 +916,15 @@ private:
 	}
 
 	std::pair<vk::raii::Image, vk::raii::DeviceMemory> createImage(
-		uint32_t width, uint32_t height, uint32_t mipLevels, vk::Format format, vk::ImageTiling tiling, vk::ImageUsageFlags usage, vk::MemoryPropertyFlags properties)
+		uint32_t width,
+		uint32_t height,
+		uint32_t mipLevels,
+		vk::SampleCountFlagBits numSamples,
+		vk::Format format,
+		vk::ImageTiling tiling,
+		vk::ImageUsageFlags usage,
+		vk::MemoryPropertyFlags properties)
+
 	{
 		vk::ImageCreateInfo imageInfo{
 			.imageType = vk::ImageType::e2D,
@@ -840,7 +932,7 @@ private:
 			.extent = {width, height, 1},
 			.mipLevels = mipLevels,
 			.arrayLayers = 1,
-			.samples = vk::SampleCountFlagBits::e1,
+			.samples = numSamples,
 			.tiling = tiling,
 			.usage = usage,
 			.sharingMode = vk::SharingMode::eExclusive,
@@ -1188,6 +1280,17 @@ private:
 		);
 
 		transition_image_layout(
+			*colorImage,
+			vk::ImageLayout::eUndefined,
+			vk::ImageLayout::eColorAttachmentOptimal,
+			vk::AccessFlagBits2::eColorAttachmentWrite,
+			vk::AccessFlagBits2::eColorAttachmentWrite,
+			vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+			vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+			vk::ImageAspectFlagBits::eColor
+		);
+
+		transition_image_layout(
 			*depthImage,
 			vk::ImageLayout::eUndefined,
 			vk::ImageLayout::eDepthAttachmentOptimal,
@@ -1203,19 +1306,21 @@ private:
 		// 1.0 is the far plane, so every fragment passes the depth test on the first draw.
 		vk::ClearValue clearDepth = vk::ClearDepthStencilValue(1.0f, 0);
 
-		vk::RenderingAttachmentInfo colorAttachmentInfo = {
-			.imageView = swapChainImageViews[imageIndex],
+		vk::RenderingAttachmentInfo colorAttachment = {
+			.imageView = colorImageView,
 			.imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
+			.resolveMode = vk::ResolveModeFlagBits::eAverage,
+			.resolveImageView = swapChainImageViews[imageIndex],
+			.resolveImageLayout = vk::ImageLayout::eColorAttachmentOptimal,
 			.loadOp = vk::AttachmentLoadOp::eClear,
 			.storeOp = vk::AttachmentStoreOp::eStore,
 			.clearValue = clearColor
 		};
 
-		vk::RenderingAttachmentInfo depthAttachmentInfo = {
+		vk::RenderingAttachmentInfo depthAttachment = {
 			.imageView = depthImageView,
 			.imageLayout = vk::ImageLayout::eDepthAttachmentOptimal,
 			.loadOp = vk::AttachmentLoadOp::eClear,
-			// Depth is only needed while drawing, not afterwards.
 			.storeOp = vk::AttachmentStoreOp::eDontCare,
 			.clearValue = clearDepth
 		};
@@ -1224,8 +1329,8 @@ private:
 			.renderArea = {.offset = {0, 0}, .extent = swapChainExtent},
 			.layerCount = 1,
 			.colorAttachmentCount = 1,
-			.pColorAttachments = &colorAttachmentInfo,
-			.pDepthAttachment = &depthAttachmentInfo
+			.pColorAttachments = &colorAttachment,
+			.pDepthAttachment = &depthAttachment
 		};
 
 		commandBuffer.beginRendering(renderingInfo);
